@@ -1,5 +1,5 @@
 % Clear all variables and close all existing figures.
-clear all
+clearvars
 close all
 
 addpath('.\functions')
@@ -24,12 +24,10 @@ T0 = 4;
 
 % Define event signal parameters.
 Tp = 1;
-w0 = pi;
 
 % Define time domain parameters
 dt = T0/(K-1);
 t = dt*(0:K-1)';
-three_dim_t = reshape(t,1,1,K);
 
 % Define frequency domain parameters
 fs = 1/dt;
@@ -61,7 +59,8 @@ if t0_true > t0_max
     error("True value of t0 exceeds maximum!")
 end
 
-num_antennas = 1;
+% Set the number of antennas
+num_antennas = 8;
 Mtot = 2*num_antennas;
 
 %%% Always generate w, n, and channel gain for maximum S, then use subsets for different S trials
@@ -69,7 +68,7 @@ S_max = max(sensor_vals);
 % Generate sensor noise with dimensions: K x S x trials x deployments.
 all_w = randn(K,S_max,1,nTrials,nDeployments);
 % Generate server noise.
-n = (randn(K,S_max,num_antennas,nTrials,nDeployments) + 1i*randn(K,S_max,num_antennas,nTrials,nDeployments));
+n = (randn(K,1,num_antennas,nTrials,nDeployments) + 1i*randn(K,1,num_antennas,nTrials,nDeployments));
 % Generate channel gains.
 all_gi = (randn(1,S_max,num_antennas,1,nDeployments) + 1i*randn(1,S_max,num_antennas,1,nDeployments))/sqrt(2);
 
@@ -77,7 +76,7 @@ all_gi = (randn(1,S_max,num_antennas,1,nDeployments) + 1i*randn(1,S_max,num_ante
 all_mi = sort(unifrnd(min_mi,max_mi,1,S_max,1,1,nDeployments),2,'descend');
 all_ti = sort(unifrnd(min_ti,max_ti,1,S_max,1,1,nDeployments),2,'ascend');
 
-selected_schemes = ["EPC"];
+selected_schemes = "EPC";
 
 % Define Rayleigh distribution parameters.
 rayleigh_factor = 1/sqrt(2);
@@ -88,8 +87,38 @@ E_mi_sqr = (1/12) * (max_mi-min_mi)^2 + 0.5*(min_mi+max_mi);
 
 % Set miscellaneous parameters
 norm_fact = 1;
+epsilon = 1e-4;
+Bee = pi/Tp;
+w_psd_constant = 1;
+n_psd_constant = 1;
+N = 2*K - 1;
 
-experiment_list = ["cwe_disjoint_peak_power_opt"];
+%% Define Anonymous Expressions
+mag_sqr_S0_internal = @(w) (norm_fact^2) * (2*Bee.^2 .* (1 + cos(w.*pi./Bee)) ) ./ (w.^2 - Bee.^2).^2;
+mag_sqr_S0 = @(w) zeroIfnan(mag_sqr_S0_internal(w)) + (w == Bee | w == -Bee) .* (mag_sqr_S0_internal(w-epsilon) + mag_sqr_S0_internal(w+epsilon))./2;
+
+%%% Expressions for original manuscript
+V_arr_internal = @(w, ai, mi, ci) scaled_w_psd_constant .* sum(ci.^2 .* ai.^2 .* mi.^2, 2) .* mag_sqr_S0_internal(w) + scaled_n_psd_constant/2;
+V_arr = @(w, ai, mi, ci) zeroIfnan(V_arr_internal(w, ai, mi, ci)) + (w == Bee | w == -Bee) .* (V_arr_internal(w-epsilon, ai, mi, ci) + V_arr_internal(w+epsilon, ai, mi, ci))./2;
+
+H_arr_internal = @(w, ai, mi, ci) (1 + epsilon) ./ (V_arr_internal(w, ai, mi, ci) + epsilon);
+H_arr = @(w, ai, mi, ci) zeroIfnan(H_arr_internal(w, ai, mi, ci)) + (w == Bee | w == -Bee) .* (H_arr_internal(w-epsilon, ai, mi, ci) + H_arr_internal(w+epsilon, ai, mi, ci))./2;
+
+alpha_objective_array = @(ai, mi, ci) (2*pi) ./( ((sum(ci .* ai .* mi.^2)).^2) .* integral(@(w) (mag_sqr_S0(w)).^2 ./ V_arr(w, ai, mi, ci), -Inf, Inf, 'ArrayValued', true));
+t0_objective_array = @(ai, mi, ci, arb_alpha) (2*pi) ./( (arb_alpha^2 .* (sum(ci .* ai .* mi.^2)).^2) .* integral(@(w) (w .* mag_sqr_S0(w)).^2 ./ V_arr(w,ai, mi, ci), -Inf, Inf, 'ArrayValued', true));
+
+%%% Expressions for multi-antenna
+Vm_arr_internal = @(w, lambda) lambda .* mag_sqr_S0_internal(w) + 1;
+Vm_arr = @(w, lambda) zeroIfnan(Vm_arr_internal(w, lambda)) + (w == Bee | w == -Bee) .* (Vm_arr_internal(w-epsilon, lambda) + Vm_arr_internal(w+epsilon, lambda))./2;
+
+Hm_arr_internal = @(w, lambda) (1 + epsilon) ./ (Vm_arr_internal(w, lambda) + epsilon);
+Hm_arr = @(w, lambda) zeroIfnan(Hm_arr_internal(w, lambda)) + (w == Bee | w == -Bee) .* (Hm_arr_internal(w-epsilon, lambda) + Hm_arr_internal(w+epsilon, lambda))./2;
+
+alpha_branch_fisher = @(bm, lambda) integral(@(w) bm.^2 .* mag_sqr_S0(w).^2 ./ Vm_arr(w, lambda), -Inf, Inf, 'ArrayValued', true);
+t0_branch_fisher = @(bm, lambda) integral(@(w) bm.^2 .* (w .* mag_sqr_S0(w)).^2 ./ Vm_arr(w, lambda), -Inf, Inf, 'ArrayValued', true);
+
+%% Define experiment list
+experiment_list = "cwe_disjoint_peak_power_opt";
 
 for experiment_idx = 1:numel(experiment_list)
     experiment = experiment_list(experiment_idx);
@@ -100,21 +129,15 @@ for experiment_idx = 1:numel(experiment_list)
 
     % Configure strategies
     agent_db_values = 0;
-    
     channel_snr = linspace(0,15,5);
     rho_vals = 0.5;
 
     pivot_vals = rho_vals;
     
-    % constraints = ["total"];
-    % transforms = ["linear"];
-    % coeff_types = ["homog."]; 
-    % approaches = ["prop. scaling"];
-    
-    constraints = ["none"];
-    transforms = ["none"];
-    coeff_types = ["none"]; 
-    approaches = ["none"];
+    constraints = "none";
+    transforms = "none";
+    coeff_types = "none"; 
+    approaches = "none";
     
     iter_arr = [];
     all_strats = [];
@@ -135,7 +158,6 @@ for experiment_idx = 1:numel(experiment_list)
     iter_length = length(transforms) * length(coeff_types) * length(approaches);
     
     num_strats = length(all_strats);
-    opt_coeffs = zeros(num_strats,2*max(sensor_vals),1,nDeployments);
     
     % Duplicate channel snr matrices for experiments.
     channel_db_values = repmat(channel_snr, length(selected_schemes), 1, length(agent_db_values));
@@ -145,11 +167,7 @@ for experiment_idx = 1:numel(experiment_list)
     rho_empirical_var = rho_crlb;
     rho_empirical_mse = rho_crlb;
     rho_empirical_bias = rho_crlb;
-    
-    % Initialize empty energy matrices
-    empirical_total_energy = zeros(num_strats,1,1,nDeployments);
-    empirical_sensor_energy = zeros(num_strats,max(sensor_vals),1,nDeployments);
-        
+
     % Start run timer
     disp("Starting runtime...")
     loopTic = tic;
@@ -160,7 +178,6 @@ for experiment_idx = 1:numel(experiment_list)
     
         % Set sensor noise power. Note the factor of 1/dt, which is equivalent to
         % applying an anti-aliasing filter.
-        w_psd_constant = 1;
         gamma_w = (dt/w_psd_constant) * (Ps / db2magTen(agent_db));
         scaled_w = sqrt(gamma_w * w_psd_constant /dt) * all_w; % --> variance of this should be gamma_w/dt
         scaled_w_psd_constant = gamma_w * w_psd_constant; %% = Nw/2
@@ -168,23 +185,15 @@ for experiment_idx = 1:numel(experiment_list)
         for pivot_idx = 1:length(pivot_vals)
         
             rho = rho_vals(pivot_idx);
-            t0_weight = 1;
-            beta = 1;
             obj_func = "crlb sum";
 
             % Iterate through sensor values.
             for sensor_idx = 1:length(sensor_vals)
                 S = sensor_vals(sensor_idx);
         
-                % Iterate through dropout values.
-                for dropout_idx = 1:length(dropout_vals)
-                    num_dropout = dropout_vals(dropout_idx);
-        
-                    if experiment == "random_dropout"
-                        save_dim = dropout_idx;
-                    else
-                        save_dim = sensor_idx;
-                    end
+                % Iterate through schemes.
+                for scheme_idx = 1:length(selected_schemes)
+                    scheme = selected_schemes(scheme_idx);
         
                     % Select subset of mi, ti, and gi values.
                     mi_5d = all_mi(:,1:S,:,:,:);
@@ -193,49 +202,91 @@ for experiment_idx = 1:numel(experiment_list)
                     gi = all_gi(:,1:S,:,:,:);
 
                     noisy_unified_xi = alpha_true .* (mi_5d .* sensor_signal(t-t0_true, Tp, norm_fact)) + scaled_w(:,1:S,:,:,:);
+                    % Compute ui here so we don't have to recompute FFT for each strat
+                    [~, ui] = mf_integral_fft(noisy_unified_xi, mi_5d .* sensor_signal(t, Tp, norm_fact), 1, 1, K, dt, Tp);
+                    % [~, ui_noise] = mf_integral_fft(scaled_w(:,1:S,:,:,:), mi_5d .* sensor_signal(t, Tp, norm_fact), 1, 1, K, dt, Tp);
     
+                    use_W = true;
+
                     % Define search space for t0
                     t0_search_space = repmat(reshape(t,1,1,[]), 1,1,1,nDeployments);
-                    [~, ui_t0_search] = mf_integral_fft(mi_4d .* sensor_signal(t-t0_search_space, Tp, norm_fact), mi_4d .* sensor_signal(t, Tp, norm_fact), 1, 1, K, dt, Tp);
-                    % Precompute FFT for matched filter template
-                    mfTemplate = mi_4d .* sensor_signal(t, Tp, norm_fact);
-                    % FFT size = 2*K - 1
-                    N = 2*K - 1;
-                    mfTemplateFFT = fft(mfTemplate, N, 1);
+                    if ~use_W
+                        [~, ui_t0_search] = mf_integral_fft(mi_4d .* sensor_signal(t-t0_search_space, Tp, norm_fact), mi_4d .* sensor_signal(t, Tp, norm_fact), 1, 1, K, dt, Tp);
+                        mfTemplate = mi_4d .* sensor_signal(t, Tp, norm_fact);
+                        mfTemplateFFT = fft(mfTemplate, N, 1);
+                    else
+                        [~, R00_t0_search] = mf_integral_fft(sensor_signal(t-t0_search_space,Tp,norm_fact), sensor_signal(t,Tp,norm_fact), 1, 1, K, dt, Tp);  % K x 1 x K x D
+                        mfTemplateFFT_raw = fft(sensor_signal(t, Tp, norm_fact), N, 1);
+                    end
 
-                    % Compute raw signal quantities
-                    [~, R00_t0_search] = mf_integral_fft(sensor_signal(t-t0_search_space,Tp,norm_fact), sensor_signal(t,Tp,norm_fact), 1, 1, K, dt, Tp);  % K x 1 x K x D
-                    mfTemplateFFT_raw = fft(sensor_signal(t, Tp, norm_fact), N, 1);
+                    if scheme == "EPC"
+                        % Apply exact phase compensation
+                        ref_ant_idx = 1;
+                        g_ref = gi(:, :, ref_ant_idx, :, :);
+                        phase_comp = exp(-1j * angle(g_ref));
+                        g_tilde = gi .* phase_comp;
+                    end
+                        
+                    out_cws = sum(g_tilde .* ui, 2);
+                    % out_cws_noise = sum(g_tilde .* ui_noise, 2);
+
+                    %% Compute values for multi-antenna
+                    m = reshape(mi_5d, S, nDeployments);           % S x nDeployments
+                    g = reshape(g_tilde, S, num_antennas, nDeployments);       % S x num_antennas x nDeployments (complex, per-antenna compensated gain)
+
+                    combined_noise_psd = reshape(m.^2 .* gamma_w, S, 1, nDeployments);
+                    Dmat = eye(S) .* combined_noise_psd;   % S x S x nDeployments
+
+                    % ---- channel-INDEPENDENT: spatial kernel + eigenvectors (once per deployment) ----
+
+                    % --- Hermitian part: A = E{v v^H} spatial kernel (M x M x nDeployments) ---
+                    A = pagemtimes(pagemtimes(pagetranspose(g), Dmat), conj(g));
+                    A = (A + pagectranspose(A)) / 2;
+
+                    % --- Pseudo-covariance part: Atilde = E{v v^T} (no conjugate) ---
+                    Atilde = pagemtimes(pagemtimes(pagetranspose(g), Dmat), g);
+                    Atilde = (Atilde + pagetranspose(Atilde)) / 2;
+
+                    B11 =  0.5 * real(A + Atilde);
+                    B12 = -0.5 * imag(A - Atilde);
+                    B21 =  0.5 * imag(A + Atilde);
+                    B22 =  0.5 * real(A - Atilde);
+
+                    B = cat(1, cat(2, B11, B12), cat(2, B21, B22));   % 2M x 2M x nDeployments
+                    B = (B + pagetranspose(B)) / 2;
+
+                    % Eigen-decompose B ITSELF (not Bprime).  Because Sigma_n_R is a scalar multiple
+                    % of I, Bprime = (2/gamma_n)*B, so the eigenVECTORS are those of B and only the
+                    % eigenVALUES scale with channel SNR.
+                    [U_B, Lam_B] = pageeig(B);
+                    for d_idx = 1:nDeployments
+                        [lam_sorted, idx] = sort(diag(Lam_B(:,:,d_idx)), 'descend');
+                        U_B(:,:,d_idx)      = U_B(:,idx,d_idx);
+                        Lam_B(:,:,d_idx)    = diag(lam_sorted);
+                    end
+
+                    UB_transpose  = pagetranspose(U_B);               % 2M x 2M x nDeployments  <-- cached "W base"
+                    lambda_B_base = zeros(Mtot, nDeployments);        % 2M x nDeployments
+                    for d_idx = 1:nDeployments
+                        lambda_B_base(:,d_idx) = diag(Lam_B(:,:,d_idx));
+                    end
+
+                    % Iterate through dropout values.
+                    for dropout_idx = 1:length(dropout_vals)
+                        save_dim = sensor_idx;
+
+                        % Iterate through channel snr values.
+                        for channel_db_idx = 1:size(channel_db_values,2)
+                            channel_db_start = tic;
     
-                    % Iterate through channel snr values.
-                    for channel_db_idx = 1:size(channel_db_values,2)
-                        channel_db_start = tic;
-                        % Iterate through schemes.
-                        for scheme_idx = 1:length(selected_schemes)
-                            scheme = selected_schemes(scheme_idx);
-        
                             % Print statement for at-a-glance performance.
                             disp('')
                             disp("=== " + scheme + " ===")
                             disp("** Agent SNR = " + (agent_db_values(agent_db_idx)) + " dB **")
                             disp("** Channel SNR = " + (channel_db_values(scheme_idx,channel_db_idx,agent_db_idx)) + " dB **")
                             disp("** S = " + S + ", Dropout = " + dropout_vals(dropout_idx) + " **")
-        
-                            n_psd_constant = 1;
-                            
-                            % Define channel gains and server noise power.
+
                             if scheme == "EPC"
-                                % Reference channel: first antenna for each sensor/deployment/trial.
-                                ref_ant_idx = 1;
-
-                                % Size: 1 x S x 1 x 1 x D
-                                g_ref = gi(:, :, ref_ant_idx, :, :);
-
-                                % Phase correction factor, broadcast across the antenna dimension.
-                                phase_comp = exp(-1j * angle(g_ref));
-
-                                % Apply compensation (implicit expansion over dim 3, the antennas).
-                                g_tilde = gi .* phase_comp;
                                 gamma_n = (dt/n_psd_constant) * Ps * E_mi_sqr * E_mag_g_sqr / db2magTen(channel_db_values(scheme_idx,channel_db_idx,agent_db_idx));
                             end
 
@@ -243,42 +294,9 @@ for experiment_idx = 1:numel(experiment_list)
                             % equivalent to applying an anti-aliasing filter.
                             scaled_n = sqrt( (gamma_n*n_psd_constant/dt) / 2 ) * n;
                             scaled_n_psd_constant = gamma_n * n_psd_constant; % == N0/2
-        
-                            epsilon = 1e-4;
-                            norm_fact = 1;
-                            Bee = pi/Tp;
-        
-                            mag_sqr_S0_internal = @(w) (norm_fact^2) * (2*Bee.^2 .* (1 + cos(w.*pi./Bee)) ) ./ (w.^2 - Bee.^2).^2;
-                            mag_sqr_S0 = @(w) zeroIfnan(mag_sqr_S0_internal(w)) + (w == Bee | w == -Bee) .* (mag_sqr_S0_internal(w-epsilon) + mag_sqr_S0_internal(w+epsilon))./2;
-        
-                            %%%%%%%%%%%%%%%%% Define Anonymous Expressions %%%%%%%%%%%%%%%%%
-
-                            %%% Expressions for original manuscript
-                            V_arr_internal = @(w, ai, mi, ci) scaled_w_psd_constant .* sum(ci.^2 .* ai.^2 .* mi.^2, 2) .* mag_sqr_S0_internal(w) + scaled_n_psd_constant/2;
-                            V_arr = @(w, ai, mi, ci) zeroIfnan(V_arr_internal(w, ai, mi, ci)) + (w == Bee | w == -Bee) .* (V_arr_internal(w-epsilon, ai, mi, ci) + V_arr_internal(w+epsilon, ai, mi, ci))./2;
-
-                            H_arr_internal = @(w, ai, mi, ci) (1 + epsilon) ./ (V_arr_internal(w, ai, mi, ci) + epsilon);
-                            H_arr = @(w, ai, mi, ci) zeroIfnan(H_arr_internal(w, ai, mi, ci)) + (w == Bee | w == -Bee) .* (H_arr_internal(w-epsilon, ai, mi, ci) + H_arr_internal(w+epsilon, ai, mi, ci))./2;
-
-                            alpha_objective_array = @(ai, mi, ci) (2*pi) ./( ((sum(ci .* ai .* mi.^2)).^2) .* integral(@(w) (mag_sqr_S0(w)).^2 ./ V_arr(w, ai, mi, ci), -Inf, Inf, 'ArrayValued', true));
-                            t0_objective_array = @(ai, mi, ci, arb_alpha) (2*pi) ./( (arb_alpha^2 .* (sum(ci .* ai .* mi.^2)).^2) .* integral(@(w) (w .* mag_sqr_S0(w)).^2 ./ V_arr(w,ai, mi, ci), -Inf, Inf, 'ArrayValued', true));
-
-                            %%% Expressions for multi-antenna
-                            Vm_arr_internal = @(w, lambda) lambda .* mag_sqr_S0_internal(w) + 1;
-                            Vm_arr = @(w, lambda) zeroIfnan(Vm_arr_internal(w, lambda)) + (w == Bee | w == -Bee) .* (Vm_arr_internal(w-epsilon, lambda) + Vm_arr_internal(w+epsilon, lambda))./2;
-
-                            Hm_arr_internal = @(w, lambda) (1 + epsilon) ./ (Vm_arr_internal(w, lambda) + epsilon);
-                            Hm_arr = @(w, lambda) zeroIfnan(Hm_arr_internal(w, lambda)) + (w == Bee | w == -Bee) .* (Hm_arr_internal(w-epsilon, lambda) + Hm_arr_internal(w+epsilon, lambda))./2;
-
-                            alpha_branch_fisher = @(bm, lambda) integral(@(w) bm.^2 .* mag_sqr_S0(w).^2 ./ Vm_arr(w, lambda), -Inf, Inf, 'ArrayValued', true);
-                            t0_branch_fisher = @(bm, lambda) integral(@(w) bm.^2 .* (w .* mag_sqr_S0(w)).^2 ./ Vm_arr(w, lambda), -Inf, Inf, 'ArrayValued', true);
 
                             %%%%%%%%%%%%%%%%% ESTIMATION %%%%%%%%%%%%%%%%%
                             total_est_start = tic;
-    
-                            % Compute ui here so we don't have to recompute FFT for each strat
-                            [~, ui] = mf_integral_fft(noisy_unified_xi, mi_5d .* sensor_signal(t, Tp, norm_fact), 1, 1, K, dt, Tp);
-                            [~, ui_noise] = mf_integral_fft(scaled_w(:,1:S,:,:,:), mi_5d .* sensor_signal(t, Tp, norm_fact), 1, 1, K, dt, Tp);
     
                             disp("Begin ML estimation...")
                             for strat_idx = 1:num_strats
@@ -288,14 +306,10 @@ for experiment_idx = 1:numel(experiment_list)
                                 ai = 1;
                                 bi = 0;
 
-                                out_cws = sum(g_tilde .* ui, 2);
-                                out_cws_noise = sum(g_tilde .* ui_noise, 2);
+                                y = pagetranspose(out_cws + scaled_n);
 
-                                y = pagetranspose(out_cws + scaled_n(:,1,:,:,:));
-                                v = pagetranspose(out_cws_noise + scaled_n(:,1,:,:,:));
-        
-                                use_W = true;
-
+                                %%% Baseline single-antenna case from
+                                %%% previous manuscripts
                                 if use_W == false
                                     ci = real(reshape(g_tilde, 1, S, 1, nDeployments));
                                     y_m = reshape(y, 1, K, nTrials, nDeployments);
@@ -330,89 +344,31 @@ for experiment_idx = 1:numel(experiment_list)
                                     denom = dt*dt*pagemtimes(pagemtimes(resh_Omega,resh_Qn),pagetranspose(resh_Omega));
 
                                     alpha_estimates = num ./ denom;
+                                %%% Multi-antenna case
                                 else
-                                    m = reshape(mi_5d, S, nDeployments);           % S x nDeployments
-                                    g = reshape(g_tilde, S, num_antennas, nDeployments);       % S x num_antennas x nDeployments (complex, per-antenna compensated gain)
-
-                                    combined_noise_psd = reshape(m.^2 .* gamma_w, S, 1, nDeployments);
-                                    Dmat = eye(S) .* combined_noise_psd;   % S x S x nDeployments
-
-                                    Sigma_n = gamma_n * eye(num_antennas); % M x M
-
-                                    printdim(m);
-                                    printdim(g);
-                                    printdim(Dmat);
-                                    printdim(Sigma_n);
-
-                                    % --- Hermitian part: A = E{v v^H} spatial kernel (M x M x nDeployments) ---
-                                    A = pagemtimes(pagemtimes(pagetranspose(g), Dmat), conj(g));
-                                    A = (A + pagectranspose(A)) / 2;
-
-                                    % --- Pseudo-covariance part: Atilde = E{v v^T} (no conjugate) ---
-                                    Atilde = pagemtimes(pagemtimes(pagetranspose(g), Dmat), g);
-                                    Atilde = (Atilde + pagetranspose(Atilde)) / 2;
-
-                                    B11 =  0.5 * real(A + Atilde);
-                                    B12 = -0.5 * imag(A - Atilde);
-                                    B21 =  0.5 * imag(A + Atilde);
-                                    B22 =  0.5 * real(A - Atilde);
-
-                                    B = cat(1, cat(2, B11, B12), cat(2, B21, B22));   % 2M x 2M x nDeployments
-                                    B = (B + pagetranspose(B)) / 2;
-
-                                    % --- Real augmented antenna-noise covariance ---
-                                    Sigma_n_R = 0.5 * blkdiag(Sigma_n, Sigma_n);            % 2M x 2M (same for all pages)
-                                    printdim(B);
-                                    printdim(Sigma_n_R);
-
-                                    % --- Whiten and solve the real symmetric eigenproblem (one W per deployment) ---
-                                    Sn_R_isqrt = diag(1 ./ sqrt(diag(Sigma_n_R)));
-                                    Bprime = pagemtimes(pagemtimes(Sn_R_isqrt, B), Sn_R_isqrt);
-                                    Bprime = (Bprime + pagetranspose(Bprime)) / 2;
-
-                                    if nDeployments == 1
-                                        [U, Lambda] = eig(Bprime);
-                                        [d, idx] = sort(diag(Lambda), 'descend');
-                                        U = U(:, idx); Lambda = diag(d);
-                                        W = U.' * Sn_R_isqrt;                          % 2M x 2M
-                                    else
-                                        [U, Lambda] = pageeig(Bprime);
-                                        for d_idx = 1:nDeployments
-                                            [~, idx] = sort(diag(Lambda(:,:,d_idx)), 'descend');
-                                            U(:,:,d_idx)      = U(:,idx,d_idx);
-                                            Lambda(:,:,d_idx) = diag(diag(Lambda(idx,idx,d_idx)));
-                                        end
-                                        W = pagemtimes(pagetranspose(U), Sn_R_isqrt);  % 2M x 2M x nDeployments
-                                    end
+                                    % ---- channel-DEPENDENT: rescale W and lambda (per channel SNR) ----
+                                    lambda_vals = (2/gamma_n)      * lambda_B_base;   % 2M x nDeployments
+                                    W           = (1/sqrt(0.5*gamma_n)) * UB_transpose;  % 2M x 2M x nDeployments
 
                                     y_sq = reshape(y, K, num_antennas, nTrials, nDeployments);   % K x num_antennas x nTrials x nDeployments
-                                    v_sq = reshape(v, K, num_antennas, nTrials, nDeployments);   % K x num_antennas x nTrials x nDeployments
+                                    g_sq = reshape(g_tilde, S, num_antennas, nDeployments);   % S x num_antennas x nDeployments
 
                                     y_R = cat(2, real(y_sq), imag(y_sq));   % K x 2M x nTrials x nDeployments
-                                    v_R = cat(2, real(v_sq), imag(v_sq));   % K x 2M x nTrials x nDeployments
-
                                     y_R = permute(y_R, [2 1 3 4]);   % 2M x K x nTrials x nDeployments
-                                    v_R = permute(v_R, [2 1 3 4]);   % 2M x K x nTrials x nDeployments
-
-                                    g_sq = reshape(g_tilde, S, num_antennas, nDeployments);
+                                    
                                     G_R = cat(2, real(g_sq), imag(g_sq));
                                     G_R = permute(G_R, [2,1,3]);
 
                                     W_bcast = reshape(W, Mtot, Mtot, 1, nDeployments);  % broadcast over nTrials
 
-                                    z       = pagemtimes(W_bcast, y_R);   % 2M x K x nTrials x nDeployments, decorrelated signal+noise
-                                    z_noise = pagemtimes(W_bcast, v_R);   % 2M x K x nTrials x nDeployments, decorrelated noise only
+                                    z = pagemtimes(W_bcast, y_R);   % 2M x K x nTrials x nDeployments, decorrelated signal+noise
 
-                                    lambda_vals = zeros(Mtot, nDeployments);
-                                    for d_idx = 1:nDeployments
-                                        lambda_vals(:,d_idx) = diag(Lambda(:,:,d_idx));
-                                    end
                                     mu = m.^2;
                                     WG_Rmu = reshape(pagemtimes(W, pagemtimes(G_R, reshape(mu, S, 1, nDeployments))), Mtot, nDeployments);  % Mtot x nDeployments
 
                                     mf_with_z_sum = zeros(1, 1, K, nTrials, nDeployments);   % running z_chi(t0)
-                                    % Gamma_chi      = zeros(1, 1, K, 1, nDeployments);        % running Gamma_chi(t0)
-
+                                    num   = zeros(1,1,nTrials,nDeployments);
+                                    denom = zeros(1,1,nTrials,nDeployments);
                                     Qn_matrix_all = cell(Mtot, 1);   % cache for reuse in alpha estimation
 
                                     for m_idx = 1:Mtot
@@ -439,9 +395,6 @@ for experiment_idx = 1:numel(experiment_list)
 
                                     t0_estimates_for_plot = reshape((I-1)*dt, 1, 1, nTrials, nDeployments);
                                     t0_estimates_for_alpha = t0_true*ones(1,1,nTrials,nDeployments);
-
-                                    num   = zeros(1,1,nTrials,nDeployments);
-                                    denom = zeros(1,1,nTrials,nDeployments);
 
                                     % Recompute the RAW (unweighted) pulse correlation at t0_estimates_for_alpha.
                                     % No mi weighting here -- mu = mi^2 is already folded into b_m via W*G_R*mu.
@@ -487,17 +440,11 @@ for experiment_idx = 1:numel(experiment_list)
                                     rho_crlb(strat_idx,agent_db_idx,channel_db_idx,1,scheme_idx,pivot_idx,save_dim,:) = alpha_objective_array(1, mi_4d, ci);
                                     rho_crlb(strat_idx,agent_db_idx,channel_db_idx,2,scheme_idx,pivot_idx,save_dim,:) = t0_objective_array(1, mi_4d, ci, alpha_true);
                                 else
-                                    alpha_term = zeros(1,1,1,nDeployments);
-                                    t0_term = zeros(1,1,1,nDeployments);
-                                    for m_idx = 1:Mtot
-                                        lambda_m = reshape(lambda_vals(m_idx,:), 1, 1, 1, nDeployments);
-                                        b_m = reshape(WG_Rmu(m_idx,:), 1, 1, 1, nDeployments);
-                                        alpha_fisher_m = alpha_branch_fisher(b_m, lambda_m);
-                                        t0_fisher_m = t0_branch_fisher(b_m, lambda_m);
+                                    b_all   = WG_Rmu;         % Mtot x D
+                                    lam_all = lambda_vals;    % Mtot x D
+                                    alpha_term = integral(@(w) sum(b_all.^2 .*          mag_sqr_S0(w).^2 ./ (lam_all.*mag_sqr_S0(w)+1), 1), -Inf, Inf, 'ArrayValued', true);
+                                    t0_term    = integral(@(w) sum(b_all.^2 .* (w.^2) .* mag_sqr_S0(w).^2 ./ (lam_all.*mag_sqr_S0(w)+1), 1), -Inf, Inf, 'ArrayValued', true);
 
-                                        alpha_term = alpha_term + alpha_fisher_m;
-                                        t0_term = t0_term + t0_fisher_m;
-                                    end
                                     rho_crlb(strat_idx,agent_db_idx,channel_db_idx,1,scheme_idx,pivot_idx,save_dim,:) = 2*pi ./ alpha_term;
                                     rho_crlb(strat_idx,agent_db_idx,channel_db_idx,2,scheme_idx,pivot_idx,save_dim,:) = 2*pi ./ (alpha_true^2 .* t0_term);
                                 end
