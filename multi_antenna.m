@@ -76,6 +76,19 @@ all_gi = (randn(1,S_max,num_antennas,1,nDeployments) + 1i*randn(1,S_max,num_ante
 all_mi = sort(unifrnd(min_mi,max_mi,1,S_max,1,1,nDeployments),2,'descend');
 all_ti = sort(unifrnd(min_ti,max_ti,1,S_max,1,1,nDeployments),2,'ascend');
 
+%% Byzantine attacker configuration
+% Attacker(s) hijack existing sensor slots and transmit unstructured (random)
+% noise in place of the honest matched-filter output. Adaptable to multiple
+% simultaneous attackers by extending attacker_idx.
+attacker_enabled = true;
+attacker_idx     = 1;      % sensor index/indices (within 1:S) that are compromised
+attacker_db      = 0;      % attacker "SNR", same convention as agent_db (see below)
+
+% One independent noise realization per potential attacker slot -- same shape
+% convention as all_w, so any subset of slots can be activated later without
+% regenerating anything.
+all_attacker_noise = randn(K,S_max,1,nTrials,nDeployments);
+
 selected_schemes = "EPC";
 
 % Define Rayleigh distribution parameters.
@@ -92,6 +105,26 @@ Bee = pi/Tp;
 w_psd_constant = 1;
 n_psd_constant = 1;
 N = 2*K - 1;
+
+%% Subspace-projection residual test: honest-signal basis Phi and its
+% orthogonal complement Psi. Built ONCE, offline -- depends only on the known
+% pulse shape and the K-point time grid, never on S, gains, or trial data.
+t0_grid_top = repmat(reshape(t,1,1,[]), 1,1,1,nDeployments);
+[~, R00_full] = mf_integral_fft(sensor_signal(t-t0_grid_top,Tp,norm_fact), sensor_signal(t,Tp,norm_fact), 1, 1, K, dt, Tp);
+D_template = reshape(R00_full(:,:,:,1), K, K);   % K x K, [D_template]_{k,l} = rho(t_k - t_l)
+
+[U_D, Sigma_D, ~] = svd(D_template, 'econ');
+sv_energy = cumsum(diag(Sigma_D).^2) / sum(diag(Sigma_D).^2);
+d_sub = find(sv_energy >= 0.999, 1, 'first');
+Phi = U_D(:, 1:d_sub);           % K x d_sub: honest-signal subspace
+Psi = U_D(:, d_sub+1:end);       % K x (K-d_sub): its orthogonal complement -- free byproduct of the same SVD
+
+% Discretized autocorrelation restricted to Psi-coordinates -- the known
+% "shape" of colored sensor noise projected into the residual space, needed
+% below to build each sensor's noise covariance K_i.
+Rss_Psi = Psi.' * D_template * Psi;   % (K-d_sub) x (K-d_sub)
+
+fprintf('Subspace-projection residual test: d = %d, K-d = %d\n', d_sub, K-d_sub);
 
 %% Define Anonymous Expressions
 mag_sqr_S0_internal = @(w) (norm_fact^2) * (2*Bee.^2 .* (1 + cos(w.*pi./Bee)) ) ./ (w.^2 - Bee.^2).^2;
@@ -114,11 +147,11 @@ Vm_arr = @(w, lambda) zeroIfnan(Vm_arr_internal(w, lambda)) + (w == Bee | w == -
 Hm_arr_internal = @(w, lambda) (1 + epsilon) ./ (Vm_arr_internal(w, lambda) + epsilon);
 Hm_arr = @(w, lambda) zeroIfnan(Hm_arr_internal(w, lambda)) + (w == Bee | w == -Bee) .* (Hm_arr_internal(w-epsilon, lambda) + Hm_arr_internal(w+epsilon, lambda))./2;
 
-alpha_branch_fisher = @(bm, lambda) integral(@(w) bm.^2 .* mag_sqr_S0(w).^2 ./ Vm_arr(w, lambda), -Inf, Inf, 'ArrayValued', true);
-t0_branch_fisher = @(bm, lambda) integral(@(w) bm.^2 .* (w .* mag_sqr_S0(w)).^2 ./ Vm_arr(w, lambda), -Inf, Inf, 'ArrayValued', true);
+% alpha_branch_fisher = @(bm, lambda) integral(@(w) bm.^2 .* mag_sqr_S0(w).^2 ./ Vm_arr(w, lambda), -Inf, Inf, 'ArrayValued', true);
+% t0_branch_fisher = @(bm, lambda) integral(@(w) bm.^2 .* (w .* mag_sqr_S0(w)).^2 ./ Vm_arr(w, lambda), -Inf, Inf, 'ArrayValued', true);
 
 %% Define experiment list
-experiment_list = "cwe_disjoint_peak_power_opt";
+experiment_list = "multi_antenna_disjoint";
 
 for experiment_idx = 1:numel(experiment_list)
     experiment = experiment_list(experiment_idx);
@@ -181,6 +214,11 @@ for experiment_idx = 1:numel(experiment_list)
         gamma_w = (dt/w_psd_constant) * (Ps / db2magTen(agent_db));
         scaled_w = sqrt(gamma_w * w_psd_constant /dt) * all_w; % --> variance of this should be gamma_w/dt
         scaled_w_psd_constant = gamma_w * w_psd_constant; %% = Nw/2
+
+        % Attacker noise power, using the SAME convention as gamma_w above --
+        % just substituting attacker_db for agent_db.
+        gamma_w_attacker = (dt/w_psd_constant) * (Ps / db2magTen(attacker_db));
+        scaled_attacker_noise = sqrt(gamma_w_attacker * w_psd_constant / dt) * all_attacker_noise;
         
         for pivot_idx = 1:length(pivot_vals)
         
@@ -204,6 +242,14 @@ for experiment_idx = 1:numel(experiment_list)
                     noisy_unified_xi = alpha_true .* (mi_5d .* sensor_signal(t-t0_true, Tp, norm_fact)) + scaled_w(:,1:S,:,:,:);
                     % Compute ui here so we don't have to recompute FFT for each strat
                     [~, ui] = mf_integral_fft(noisy_unified_xi, mi_5d .* sensor_signal(t, Tp, norm_fact), 1, 1, K, dt, Tp);
+                    %% --- Byzantine attacker: overwrite compromised sensor(s)' transmitted
+                    % signal with unstructured noise, in place of their honest ui(t). ---
+                    if attacker_enabled
+                        active_attackers = attacker_idx(attacker_idx <= S);
+                        for a = active_attackers
+                            ui(:, a, :, :, :) = scaled_attacker_noise(:, a, :, :, :);
+                        end
+                    end
                     % [~, ui_noise] = mf_integral_fft(scaled_w(:,1:S,:,:,:), mi_5d .* sensor_signal(t, Tp, norm_fact), 1, 1, K, dt, Tp);
     
                     use_W = true;
@@ -233,6 +279,9 @@ for experiment_idx = 1:numel(experiment_list)
                     %% Compute values for multi-antenna
                     m = reshape(mi_5d, S, nDeployments);           % S x nDeployments
                     g = reshape(g_tilde, S, num_antennas, nDeployments);       % S x num_antennas x nDeployments (complex, per-antenna compensated gain)
+
+                    G_R = cat(2, real(g), imag(g));
+                    G_R = permute(G_R, [2,1,3]);   % Mtot x S x nDeployments (channel-independent)
 
                     combined_noise_psd = reshape(m.^2 .* gamma_w, S, 1, nDeployments);
                     Dmat = eye(S) .* combined_noise_psd;   % S x S x nDeployments
@@ -271,6 +320,25 @@ for experiment_idx = 1:numel(experiment_list)
                         lambda_B_base(:,d_idx) = diag(Lam_B(:,:,d_idx));
                     end
 
+                    %% --- Precompute null-space isolation projectors (channel-independent;
+                    % reused across every channel-SNR point and trial for this S/scheme) ---
+                    r_dim = Mtot - S + 1;   % surviving real dimensions after nulling S-1 sensors
+                    Pi_all = cell(S,1);
+                    breve_g_all = cell(S,1);
+                    for i = 1:S
+                        others = setdiff(1:S, i);
+                        Pi_i_d = zeros(r_dim, Mtot, nDeployments);
+                        breve_g_i_d = zeros(r_dim, nDeployments);
+                        for d_idx = 1:nDeployments
+                            G_others = G_R(:, others, d_idx);      % Mtot x (S-1)
+                            Pi_i_mat = null(G_others.').';          % r_dim x Mtot, orthonormal rows
+                            Pi_i_d(:,:,d_idx) = Pi_i_mat;
+                            breve_g_i_d(:,d_idx) = Pi_i_mat * G_R(:, i, d_idx);
+                        end
+                        Pi_all{i} = Pi_i_d;
+                        breve_g_all{i} = breve_g_i_d;
+                    end
+
                     % Iterate through dropout values.
                     for dropout_idx = 1:length(dropout_vals)
                         save_dim = sensor_idx;
@@ -290,10 +358,29 @@ for experiment_idx = 1:numel(experiment_list)
                                 gamma_n = (dt/n_psd_constant) * Ps * E_mi_sqr * E_mag_g_sqr / db2magTen(channel_db_values(scheme_idx,channel_db_idx,agent_db_idx));
                             end
 
-                            % Set server noise power. Note the factor of 1/dt which is
+                            %% Set server noise power. Note the factor of 1/dt which is
                             % equivalent to applying an anti-aliasing filter.
                             scaled_n = sqrt( (gamma_n*n_psd_constant/dt) / 2 ) * n;
                             scaled_n_psd_constant = gamma_n * n_psd_constant; % == N0/2
+
+                            % --- Per-sensor known noise covariance for the residual test:
+                            % K_i = m_i^2*(Nw/2)*Rss_Psi + (N0/2)/||breve_g_i||^2 * I.
+                            % Computed once per channel-SNR point (deterministic given known
+                            % parameters -- does NOT depend on trial noise realizations, so
+                            % it's reused across all nTrials below). ---
+                            Nw_over_2 = scaled_w_psd_constant;   % == Nw/2
+                            N0_over_2 = scaled_n_psd_constant / (2*dt);   % == N0/2
+                            Ki_inv_all = cell(S,1);
+                            for i = 1:S
+                                Ki_inv_d = zeros(K-d_sub, K-d_sub, nDeployments);
+                                for d_idx = 1:nDeployments
+                                    mi_val = mi_5d(1,i,1,1,d_idx);
+                                    norm_sq_i = sum(breve_g_all{i}(:,d_idx).^2);
+                                    K_i = mi_val^2 * Nw_over_2 * Rss_Psi + (N0_over_2/norm_sq_i) * eye(K-d_sub);
+                                    Ki_inv_d(:,:,d_idx) = inv(K_i);
+                                end
+                                Ki_inv_all{i} = Ki_inv_d;
+                            end
 
                             %%%%%%%%%%%%%%%%% ESTIMATION %%%%%%%%%%%%%%%%%
                             total_est_start = tic;
@@ -355,6 +442,84 @@ for experiment_idx = 1:numel(experiment_list)
 
                                     y_R = cat(2, real(y_sq), imag(y_sq));   % K x 2M x nTrials x nDeployments
                                     y_R = permute(y_R, [2 1 3 4]);   % 2M x K x nTrials x nDeployments
+
+                                    % --- Null-space isolation: recover each sensor's own
+                                    % contribution, including the attacker's, on the RAW
+                                    % (unprojected, un-decorrelated) received signal. ---
+                                    hat_u_all = zeros(K, S, nTrials, nDeployments);
+                                    for i = 1:S
+                                        Pi_i_bcast = reshape(Pi_all{i}, r_dim, Mtot, 1, nDeployments);
+                                        isolated = pagemtimes(Pi_i_bcast, y_R);   % r_dim x K x nTrials x nDeployments
+
+                                        breve_g_i_bcast = reshape(breve_g_all{i}, 1, r_dim, 1, nDeployments);
+                                        norm_sq_bcast = reshape(sum(breve_g_all{i}.^2, 1), 1, 1, 1, nDeployments);
+
+                                        hat_u_i = pagemtimes(breve_g_i_bcast, isolated) ./ norm_sq_bcast;  % 1 x K x nTrials x nDeployments
+                                        hat_u_all(:, i, :, :) = reshape(hat_u_i, K, 1, nTrials, nDeployments);
+                                    end
+
+                                    %% --- Subspace-projection residual test: whitened
+                                    % out-of-Phi energy per sensor. T_i ~ chi^2_{K-d_sub}
+                                    % under "sensor i honest" -- uses NEITHER alpha_true nor
+                                    % t0_true anywhere in this computation. ---
+                                    T_i_all = zeros(1, S, nTrials, nDeployments);
+                                    for i = 1:S
+                                        u_i = reshape(hat_u_all(:,i,:,:), K, nTrials, nDeployments);
+
+                                        % In-Phi part (what a matching honest shape explains)
+                                        % removed; Psi-coordinates of whatever's left.
+                                        proj_i = pagemtimes(Phi, pagemtimes(Phi.', u_i));
+                                        R_i_psi = pagemtimes(Psi.', u_i - proj_i);   % (K-d_sub) x nTrials x nDeployments
+
+                                        R_i_row = reshape(R_i_psi, 1, K-d_sub, nTrials, nDeployments);
+                                        R_i_col = reshape(R_i_psi, K-d_sub, 1, nTrials, nDeployments);
+                                        Ki_inv_bcast = reshape(Ki_inv_all{i}, K-d_sub, K-d_sub, 1, nDeployments);
+
+                                        % Whitened quadratic form: T_i = R_i^T * Ki^-1 * R_i
+                                        T_i_all(1,i,:,:) = pagemtimes(pagemtimes(R_i_row, Ki_inv_bcast), R_i_col);
+                                    end
+
+                                    % Fixed, precomputed threshold -- same value for every
+                                    % sensor, every trial, every deployment (Statistics and
+                                    % Machine Learning Toolbox required for chi2inv).
+                                    delta_fa = 0.01;
+                                    T_threshold = chi2inv(1-delta_fa, K-d_sub);
+                                    flagged = T_i_all > T_threshold;   % 1 x S x nTrials x nDeployments logical
+
+                                    %% --- DIAGNOSTIC: isolate Nw-term and N0-term scaling in K_i ---
+                                    % diag_sensor = setdiff(1:S, attacker_idx); diag_sensor = diag_sensor(1);   % an honest sensor
+                                    % diag_dep = 1;
+                                    % 
+                                    % Pi_bcast      = reshape(Pi_all{diag_sensor}, r_dim, Mtot, 1, nDeployments);
+                                    % breve_bcast   = reshape(breve_g_all{diag_sensor}, 1, r_dim, 1, nDeployments);
+                                    % norm_sq_bcast = reshape(sum(breve_g_all{diag_sensor}.^2,1), 1,1,1,nDeployments);
+                                    % 
+                                    % % --- Test A: sensor-noise-only (zero antenna noise) ---
+                                    % [~, ui_noise_only] = mf_integral_fft(scaled_w(:,1:S,:,:,:), mi_5d .* sensor_signal(t, Tp, norm_fact), 1, 1, K, dt, Tp);
+                                    % y_A = pagetranspose(sum(g_tilde .* ui_noise_only, 2));           % NO scaled_n added
+                                    % y_sq_A = reshape(y_A, K, num_antennas, nTrials, nDeployments);
+                                    % y_R_A = permute(cat(2, real(y_sq_A), imag(y_sq_A)), [2 1 3 4]);
+                                    % 
+                                    % hat_u_A = pagemtimes(breve_bcast, pagemtimes(Pi_bcast, y_R_A)) ./ norm_sq_bcast;
+                                    % hat_u_A = reshape(hat_u_A(:,:,:,diag_dep), K, nTrials);
+                                    % Ri_psi_A = Psi.' * (hat_u_A - Phi*(Phi.'*hat_u_A));
+                                    % 
+                                    % mi_val = mi_5d(1,diag_sensor,1,1,diag_dep);
+                                    % ratio_A = trace(Ri_psi_A*Ri_psi_A.'/nTrials) / trace(mi_val^2 * Nw_over_2 * Rss_Psi);
+                                    % fprintf('Nw term: empirical/predicted = %.4f   (1/dt = %.4f)\n', ratio_A, 1/dt);
+                                    % 
+                                    % % --- Test B: antenna-noise-only (zero sensor noise / signal) ---
+                                    % y_B = pagetranspose(scaled_n);
+                                    % y_sq_B = reshape(y_B, K, num_antennas, nTrials, nDeployments);
+                                    % y_R_B = permute(cat(2, real(y_sq_B), imag(y_sq_B)), [2 1 3 4]);
+                                    % 
+                                    % hat_u_B = pagemtimes(breve_bcast, pagemtimes(Pi_bcast, y_R_B)) ./ norm_sq_bcast;
+                                    % hat_u_B = reshape(hat_u_B(:,:,:,diag_dep), K, nTrials);
+                                    % Ri_psi_B = Psi.' * (hat_u_B - Phi*(Phi.'*hat_u_B));
+                                    % 
+                                    % norm_sq_i = sum(breve_g_all{diag_sensor}(:,diag_dep).^2);
+                                    % ratio_B = trace(Ri_psi_B*Ri_psi_B.'/nTrials) / trace((N0_over_2/norm_sq_i)*eye(K-d_sub));
+                                    % fprintf('N0 term: empirical/predicted = %.4f   (1/dt = %.4f)\n', ratio_B, 1/dt);
                                     
                                     G_R = cat(2, real(g_sq), imag(g_sq));
                                     G_R = permute(G_R, [2,1,3]);
