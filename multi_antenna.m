@@ -1,6 +1,6 @@
 % Clear all variables and close all existing figures.
 clearvars
-close all
+% close all
 
 addpath('.\functions')
 
@@ -83,6 +83,7 @@ all_ti = sort(unifrnd(min_ti,max_ti,1,S_max,1,1,nDeployments),2,'ascend');
 attacker_enabled = true;
 attacker_idx     = 1;      % sensor index/indices (within 1:S) that are compromised
 attacker_db      = 0;      % attacker "SNR", same convention as agent_db (see below)
+use_greedy_validation = false;   % true: Lambda-validated greedy; false: face-value nulling
 
 % One independent noise realization per potential attacker slot -- same shape
 % convention as all_w, so any subset of slots can be activated later without
@@ -482,9 +483,12 @@ for experiment_idx = 1:numel(experiment_list)
                                     % Fixed, precomputed threshold -- same value for every
                                     % sensor, every trial, every deployment (Statistics and
                                     % Machine Learning Toolbox required for chi2inv).
-                                    delta_fa = 0.01;
+                                    delta_fa = 1e-6;
                                     T_threshold = chi2inv(1-delta_fa, K-d_sub);
                                     flagged = T_i_all > T_threshold;   % 1 x S x nTrials x nDeployments logical
+
+                                    honest_idx = setdiff(1:S, attacker_idx);
+                                    empirical_fa_rate = mean(flagged(1,honest_idx,:,:), 'all');
 
                                     %% --- DIAGNOSTIC: isolate Nw-term and N0-term scaling in K_i ---
                                     % diag_sensor = setdiff(1:S, attacker_idx); diag_sensor = diag_sensor(1);   % an honest sensor
@@ -587,6 +591,107 @@ for experiment_idx = 1:numel(experiment_list)
                                         denom = denom + denom_m;
                                     end
                                     alpha_estimates = num ./ denom;
+
+                                    % Lambda(empty-set): captured coherent energy of the
+                                    % UNDEFENDED, full-array estimate -- free, already have
+                                    % both ingredients. This is the baseline every candidate
+                                    % nulling gets compared against.
+                                    Lambda_empty = (alpha_estimates.^2) .* denom;
+
+                                    % Per-trial flagged sensor SET (face value -- no validation).
+                                    % May be empty, a single sensor, or multiple sensors if more
+                                    % than one clears threshold in a given trial.
+                                    excluded_sets = cell(nTrials, nDeployments);
+                                    for d_idx = 1:nDeployments
+                                        for tr = 1:nTrials
+                                            flags_this = squeeze(flagged(1,:,tr,d_idx));   % 1 x S logical
+                                            excluded_sets{tr,d_idx} = find(flags_this);     % row vec, possibly empty
+                                        end
+                                    end
+
+                                    % Group trials within each deployment by their EXACT flagged
+                                    % set (usually just a couple of distinct groups given how
+                                    % separated T_i is), and null/re-estimate once per group --
+                                    % avoids one function call per individual trial.
+                                    alpha_final = alpha_estimates;
+                                    t0_final = t0_estimates_for_plot;
+
+                                    geom_cache = containers.Map('KeyType','char','ValueType','any');
+
+                                    accepted_count = 0;
+                                    rejected_count = 0;
+
+                                    for d_idx = 1:nDeployments
+                                        for tr = 1:nTrials
+                                            F = excluded_sets{tr,d_idx};
+                                            if isempty(F)
+                                                continue   % nothing flagged -- keep undefended estimate
+                                            end
+
+                                            % Order THIS trial's candidates by ITS OWN T_i --
+                                            % fully per-trial, no averaging across trials.
+                                            Ti_this = T_i_all(1,F,tr,d_idx);
+                                            [~, order] = sort(Ti_this(:), 'descend');
+                                            F_sorted = F(order.');
+
+                                            if use_greedy_validation
+                                                current_A      = [];
+                                                current_alpha  = alpha_estimates(1,1,tr,d_idx);
+                                                current_t0     = t0_estimates_for_plot(1,1,tr,d_idx);
+                                                current_Lambda = Lambda_empty(1,1,tr,d_idx);
+
+                                                for c = F_sorted
+                                                    try_A = sort([current_A, c]);   % sorted -> order-independent cache key
+                                                    key = sprintf('%d_%s', d_idx, mat2str(try_A));
+
+                                                    if isKey(geom_cache, key)
+                                                        geom = geom_cache(key);
+                                                    else
+                                                        geom = build_null_geometry(try_A, mi_5d, g_tilde, gamma_w, gamma_n, Hm_arr, omega, dt, K, S, d_idx);
+                                                        geom_cache(key) = geom;
+                                                    end
+
+                                                    [try_alpha, try_t0, try_Lambda] = estimate_with_geometry(geom, y, K, N, Tp, ...
+                                                        norm_fact, t, t0_true, mfTemplateFFT_raw, D_template, tr, d_idx, dt);
+
+                                                    if try_Lambda > current_Lambda
+                                                        current_A      = try_A;
+                                                        current_alpha  = try_alpha;
+                                                        current_t0     = try_t0;
+                                                        current_Lambda = try_Lambda;
+                                                        accepted_count = accepted_count + 1;
+                                                    else
+                                                        rejected_count = rejected_count + 1;
+                                                    end
+                                                end
+                                            else
+                                                % Face value: null everyone flagged, no validation.
+                                                current_A = F;
+                                                key = sprintf('%d_%s', d_idx, mat2str(sort(current_A)));
+
+                                                if isKey(geom_cache, key)
+                                                    geom = geom_cache(key);
+                                                else
+                                                    geom = build_null_geometry(current_A, mi_5d, g_tilde, gamma_w, gamma_n, Hm_arr, omega, dt, K, S, d_idx);
+                                                    geom_cache(key) = geom;
+                                                end
+
+                                                [current_alpha, current_t0, ~] = estimate_with_geometry(geom, y, K, N, Tp, ...
+                                                    norm_fact, t, t0_true, mfTemplateFFT_raw, D_template, tr, d_idx, dt);
+                                            end
+
+                                            if ~isempty(current_A)
+                                                alpha_final(1,1,tr,d_idx) = current_alpha;
+                                                t0_final(1,1,tr,d_idx) = current_t0;
+                                            end
+                                        end
+                                    end
+
+                                    fprintf('Greedy validation: %d accepted, %d rejected (%d distinct null-geometries built and cached)\n', ...
+                                        accepted_count, rejected_count, geom_cache.Count);
+
+                                    alpha_estimates = alpha_final;
+                                    t0_estimates_for_plot = t0_final;
                                 end
 
                                 % Compute empirical variance.
@@ -761,4 +866,188 @@ for experiment_idx = 1:numel(experiment_list)
             end
         end
     end
+end
+
+%% Functions
+function geom = build_null_geometry(A, mi_5d, g_tilde, gamma_w, gamma_n, Hm_arr, omega, dt, K, S, d_idx)
+% Everything needed to null set A and estimate for deployment d_idx -- depends
+% ONLY on A and d_idx (and gamma_w/gamma_n, fixed for the current channel-SNR
+% point). NEVER depends on trial data -- safe to cache and reuse across every
+% trial and every greedy step that happens to test this same A.
+
+num_antennas = size(g_tilde,3);
+Mtot_full = 2*num_antennas;
+retained = setdiff(1:S, A);
+
+g_full = reshape(g_tilde(1,1:S,:,1,d_idx), S, num_antennas);
+G_R_full = permute(cat(2, real(g_full), imag(g_full)), [2,1]);   % Mtot_full x S
+
+r_dim = Mtot_full - numel(A);
+Q_A = null(G_R_full(:,A).').';   % r_dim x Mtot_full
+
+breve_g_ret = Q_A * G_R_full(:,retained);   % r_dim x (S-|A|)
+
+m_ret = mi_5d(1,retained,1,1,d_idx);
+Dmat_ret = diag(m_ret.^2 * gamma_w);
+
+B_A = breve_g_ret * Dmat_ret * breve_g_ret.';
+B_A = (B_A + B_A.')/2;
+
+[U_A, Lam_A] = eig(B_A/gamma_n);
+[lam_sorted, idx] = sort(diag(Lam_A), 'descend');
+U_A = U_A(:,idx);
+lambda_vals_A = lam_sorted;
+W_A = (1/sqrt(gamma_n)) * U_A.';
+
+mu_ret = m_ret.^2;
+WGmu_A = W_A * breve_g_ret * mu_ret.';   % r_dim x 1
+
+Qn_cache = cell(r_dim,1);
+for m_idx = 1:r_dim
+    mag_sqr_H_m = Hm_arr(omega, lambda_vals_A(m_idx));
+    [~, Qn_m] = get_time_domain(mag_sqr_H_m, dt, 1);
+    Qn_cache{m_idx} = Qn_m;
+end
+
+geom.Q_A = Q_A;
+geom.r_dim = r_dim;
+geom.W_A = W_A;
+geom.WGmu_A = WGmu_A;
+geom.Qn_cache = Qn_cache;
+geom.num_antennas = num_antennas;
+end
+
+function [alpha_hat, t0_hat, Lambda_hat] = estimate_with_geometry(geom, y, K, N, Tp, norm_fact, ...
+    t, t0_true, mfTemplateFFT_raw, D_template, trial_idx, d_idx, dt)
+% Applies a PRECOMPUTED geometry to ONE trial's data -- no eig, no null-space
+% construction, no get_time_domain here. This is the only part redone per trial.
+
+n_ret = numel(trial_idx);
+r_dim = geom.r_dim;
+
+y_dep = y(:,:,:,trial_idx,d_idx);
+y_sq = reshape(y_dep, K, geom.num_antennas, n_ret);
+y_R_full = permute(cat(2, real(y_sq), imag(y_sq)), [2 1 3]);   % Mtot_full x K x n_ret
+y_R_A = pagemtimes(geom.Q_A, y_R_full);                          % r_dim x K x n_ret
+
+z_A = pagemtimes(geom.W_A, y_R_A);   % r_dim x K x n_ret
+
+mf_with_z_sum = zeros(1,1,K,n_ret);
+for m_idx = 1:r_dim
+    b_m = geom.WGmu_A(m_idx);
+    Omega_t0 = reshape(b_m * D_template, K,1,K);
+    z_m = reshape(z_A(m_idx,:,:), 1, K, 1, n_ret);
+    mf_with_z_sum = mf_with_z_sum + dt*dt*pagemtimes(pagemtimes(z_m, reshape(geom.Qn_cache{m_idx},K,K,1,1)), Omega_t0);
+end
+
+[~, I] = max(mf_with_z_sum,[],3);
+t0_hat = reshape((I-1)*dt, 1,1,n_ret);
+t0_for_alpha = t0_true*ones(1,1,n_ret);
+
+Af = fft(sensor_signal(t-t0_for_alpha, Tp, norm_fact), N, 1);
+lag0 = round(Tp/dt);
+Y_tensor = dt*ifft(Af .* mfTemplateFFT_raw, [], 1);
+Rss_tensor = Y_tensor(lag0+1:(lag0+K),:,:);
+
+num = zeros(1,1,n_ret);
+denom = zeros(1,1,n_ret);
+for m_idx = 1:r_dim
+    Qn_m = geom.Qn_cache{m_idx};
+    b_m = geom.WGmu_A(m_idx);
+    Omega_m = b_m * Rss_tensor;
+    resh_Omega = reshape(Omega_m,1,K,n_ret);
+    z_m = reshape(z_A(m_idx,:,:), 1, K, n_ret);
+    num = num + dt*dt*pagemtimes(pagemtimes(z_m,reshape(Qn_m,K,K,1)),pagetranspose(resh_Omega));
+    denom = denom + dt*dt*pagemtimes(pagemtimes(resh_Omega,reshape(Qn_m,K,K,1)),pagetranspose(resh_Omega));
+end
+alpha_hat = num ./ denom;
+Lambda_hat = (alpha_hat.^2) .* denom;
+end
+
+function [unique_sets, group_idx] = unique_cell_sets(set_cell)
+% Groups a cell array of numeric row-vectors by exact content, regardless
+% of length (MATLAB's built-in unique() doesn't handle this directly).
+keys = cellfun(@(x) mat2str(sort(x)), set_cell, 'UniformOutput', false);
+[unique_keys, ~, group_idx] = unique(keys);
+unique_sets = cellfun(@(k) str2num(k), unique_keys, 'UniformOutput', false); %#ok<ST2NM>
+end
+
+function [alpha_hat, t0_hat, Lambda_hat] = null_and_estimate(A, y, mi_5d, g_tilde, gamma_w, gamma_n, ...
+    Hm_arr, omega, dt, K, N, Tp, norm_fact, t, t0_true, mfTemplateFFT_raw, trial_idx, S, d_idx)
+% Nulls the (possibly multi-sensor) set A -- no validation, applied at face value.
+
+num_antennas = size(g_tilde,3);
+Mtot_full = 2*num_antennas;
+retained = setdiff(1:S, A);
+n_ret = numel(trial_idx);
+
+g_full = reshape(g_tilde(1,1:S,:,1,d_idx), S, num_antennas);
+G_R_full = permute(cat(2, real(g_full), imag(g_full)), [2,1]);   % Mtot_full x S
+
+% --- Q_A: null EVERY sensor in A simultaneously (generalizes directly to |A|>1) ---
+r_dim = Mtot_full - numel(A);
+Q_A = null(G_R_full(:,A).').';   % r_dim x Mtot_full, orthonormal rows
+
+breve_g_ret = Q_A * G_R_full(:,retained);   % r_dim x (S-|A|)
+
+y_dep = y(:,:,:,trial_idx,d_idx);
+y_sq = reshape(y_dep, K, num_antennas, n_ret);
+y_R_full = permute(cat(2, real(y_sq), imag(y_sq)), [2 1 3]);   % Mtot_full x K x n_ret
+y_R_A = pagemtimes(Q_A, y_R_full);                              % r_dim x K x n_ret
+
+m_ret = mi_5d(1,retained,1,1,d_idx);
+Dmat_ret = diag(m_ret.^2 * gamma_w);
+
+B_A = breve_g_ret * Dmat_ret * breve_g_ret.';
+B_A = (B_A + B_A.')/2;
+
+[U_A, Lam_A] = eig(B_A/gamma_n);
+[lam_sorted, idx] = sort(diag(Lam_A), 'descend');
+U_A = U_A(:,idx);
+lambda_vals_A = lam_sorted;
+W_A = (1/sqrt(gamma_n)) * U_A.';
+
+z_A = pagemtimes(W_A, y_R_A);   % r_dim x K x n_ret
+
+mu_ret = m_ret.^2;
+WGmu_A = W_A * breve_g_ret * mu_ret.';   % r_dim x 1
+
+t0_grid = reshape(t,1,1,[]);
+[~, R00_full] = mf_integral_fft(sensor_signal(t-t0_grid,Tp,norm_fact), sensor_signal(t,Tp,norm_fact), 1, 1, K, dt, Tp);
+R00_full = squeeze(R00_full);   % K x K
+
+mf_with_z_sum = zeros(1,1,K,n_ret);
+Qn_cache = cell(r_dim,1);
+for m_idx = 1:r_dim
+    mag_sqr_H_m = Hm_arr(omega, lambda_vals_A(m_idx));
+    [~, Qn_m] = get_time_domain(mag_sqr_H_m, dt, 1);
+    Qn_cache{m_idx} = Qn_m;
+    b_m = WGmu_A(m_idx);
+    Omega_t0 = reshape(b_m * R00_full, K,1,K);
+    z_m = reshape(z_A(m_idx,:,:), 1, K, 1, n_ret);
+    mf_with_z_sum = mf_with_z_sum + dt*dt*pagemtimes(pagemtimes(z_m, reshape(Qn_m,K,K,1,1)), Omega_t0);
+end
+
+[~, I] = max(mf_with_z_sum,[],3);
+t0_hat = reshape((I-1)*dt, 1,1,n_ret);
+t0_for_alpha = t0_true*ones(1,1,n_ret);
+
+Af = fft(sensor_signal(t-t0_for_alpha, Tp, norm_fact), N, 1);
+lag0 = round(Tp/dt);
+Y_tensor = dt*ifft(Af .* mfTemplateFFT_raw, [], 1);
+Rss_tensor = Y_tensor(lag0+1:(lag0+K),:,:);
+
+num = zeros(1,1,n_ret);
+denom = zeros(1,1,n_ret);
+for m_idx = 1:r_dim
+    Qn_m = Qn_cache{m_idx};
+    b_m = WGmu_A(m_idx);
+    Omega_m = b_m * Rss_tensor;
+    resh_Omega = reshape(Omega_m,1,K,n_ret);
+    z_m = reshape(z_A(m_idx,:,:), 1, K, n_ret);
+    num = num + dt*dt*pagemtimes(pagemtimes(z_m,reshape(Qn_m,K,K,1)),pagetranspose(resh_Omega));
+    denom = denom + dt*dt*pagemtimes(pagemtimes(resh_Omega,reshape(Qn_m,K,K,1)),pagetranspose(resh_Omega));
+end
+alpha_hat = num ./ denom;
+Lambda_hat = (alpha_hat.^2) .* denom;
 end
