@@ -108,7 +108,7 @@ Bee = pi/Tp;
 % changes. Deterministic attacks (dc/square/sawtooth/sinusoid) draw ONE
 % independent set of parameters per potential attacker slot, reused across
 % every trial; only "noise" is redrawn per trial.
-attack_type = "flip";   % "noise" | "dc" | "square" | "sawtooth" | "sinusoid" | "peak" | "replay" | "flip"
+attack_type = "replay";   % "noise" | "dc" | "square" | "sawtooth" | "sinusoid" | "peak" | "replay" | "flip"
 attacker_seed = 42;         % dedicated seed so this doesn't perturb other RNG draws
 
 rng(attacker_seed);
@@ -177,6 +177,7 @@ switch attack_type
 
         feasible_grid = t(t <= t0_max);
         tau_per_slot = feasible_grid(randi(numel(feasible_grid), 1, S_max));
+        % tau_per_slot = 0.1 * ones(1, S_max); 
 
         waveform = zeros(K, S_max);
         for a = 1:S_max
@@ -237,6 +238,11 @@ Rss_Psi = Psi.' * D_template * Psi;   % (K-d_sub) x (K-d_sub)
 % reweight instead of a fresh (K-d_sub)^3 matrix inverse every time K_i is needed.
 [V_Rss, Lam_Rss] = eig((Rss_Psi+Rss_Psi.')/2);
 lam_Rss = diag(Lam_Rss);   % (K-d_sub) x 1
+
+% Eigenvalues of D_template itself (already computed via U_D/Sigma_D above) --
+% needed below to whiten against a single candidate direction rho(.-t0_hat)
+% rather than the full Phi/Psi split, for the coherent-replay (T_i^align) test.
+lam_D = diag(Sigma_D);   % K x 1
 
 fprintf('Subspace-projection residual test: d = %d, K-d = %d\n', d_sub, K-d_sub);
 
@@ -496,22 +502,30 @@ for experiment_idx = 1:numel(experiment_list)
                             % it's reused across all nTrials below). ---
                             Nw_over_2 = scaled_w_psd_constant;   % == Nw/2
                             N0_over_2 = scaled_n_psd_constant / (2*dt);   % == N0/2
-                            % Ki_inv_all = cell(S,1);
-                            % for i = 1:S
-                            %     Ki_inv_d = zeros(K-d_sub, K-d_sub, nDeployments);
-                            %     for d_idx = 1:nDeployments
-                            %         mi_val = mi_5d(1,i,1,1,d_idx);
-                            %         norm_sq_i = sum(breve_g_all{i}(:,d_idx).^2);
-                            %         K_i = mi_val^2 * Nw_over_2 * Rss_Psi + (N0_over_2/norm_sq_i) * eye(K-d_sub);
-                            %         Ki_inv_d(:,:,d_idx) = inv(K_i);
-                            %     end
-                            %     Ki_inv_all{i} = Ki_inv_d;
-                            % end
 
                             % K_i = a_i*Rss_Psi + b_i*I shares V_Rss's eigenvectors for ANY
                             % a_i,b_i -- store only the per-sensor, per-deployment eigenvalue
                             % reweighting, not full inverse matrices.
+                            
+                            % Ki_diag_all = cell(S,1);
+                            % for i = 1:S
+                            %     a_i = reshape(mi_5d(1,i,1,1,:).^2 * Nw_over_2, 1, nDeployments);
+                            %     norm_sq_i = zeros(1,nDeployments);
+                            %     for d_idx = 1:nDeployments
+                            %         norm_sq_i(d_idx) = sum(breve_g_all{i}(:,d_idx).^2);
+                            %     end
+                            %     b_i = N0_over_2 ./ norm_sq_i;
+                            % 
+                            %     Ki_diag_all{i} = 1 ./ (lam_Rss .* a_i + b_i);   % (K-d_sub) x nDeployments
+                            % end
+
+                            % Ki_full_eig{i}: SAME a_i,b_i as above, but against D_template's
+                            % OWN eigenvalues (lam_D) instead of Rss_Psi's -- gives the full
+                            % K-dimensional noise model needed by T_i^align (coherent-replay
+                            % test), which whitens against a single direction rho(.-t0_hat),
+                            % not the reduced Psi-space T_i already uses.
                             Ki_diag_all = cell(S,1);
+                            Ki_full_eig = cell(S,1);
                             for i = 1:S
                                 a_i = reshape(mi_5d(1,i,1,1,:).^2 * Nw_over_2, 1, nDeployments);
                                 norm_sq_i = zeros(1,nDeployments);
@@ -521,6 +535,7 @@ for experiment_idx = 1:numel(experiment_list)
                                 b_i = N0_over_2 ./ norm_sq_i;
 
                                 Ki_diag_all{i} = 1 ./ (lam_Rss .* a_i + b_i);   % (K-d_sub) x nDeployments
+                                Ki_full_eig{i} = lam_D .* a_i + b_i;            % K x nDeployments (eigenVALUES, not inverted -- see usage below)
                             end
 
                             %%%%%%%%%%%%%%%%% ESTIMATION %%%%%%%%%%%%%%%%%
@@ -718,6 +733,43 @@ for experiment_idx = 1:numel(experiment_list)
                                     sign_flagged = hat_c_all < 0;   % 1 x S x nTrials x nDeployments logical
                                     flagged = flagged | sign_flagged;   % combine with the existing T_i-based flag
 
+                                    %% --- Coherent-replay defense (T_i^align) ---
+                                    % Tests each sensor against the SINGLE consensus direction
+                                    % rho(.-t0_hat) (reusing t0_col_idx_per_trial from the
+                                    % sign-flip check above), not the full d_sub-dim family Phi.
+                                    % A wrong-tau replay passes T_i (fools the family test) but
+                                    % should FAIL this -- low correlation with the array's own
+                                    % consensus timing. GLS decomposition in D_template's own
+                                    % eigenbasis (U_D): E_total = whitened energy of u_i,
+                                    % S_captured = whitened energy explained by the single
+                                    % direction rho(.-t0_hat), T_align = E_total - S_captured.
+                                    T_align_all = zeros(1, S, nTrials, nDeployments);
+                                    for i = 1:S
+                                        u_i = reshape(hat_u_all(:,i,:,:), K, nTrials, nDeployments);
+                                        u_i_v = pagemtimes(U_D.', u_i);   % K x nTrials x nDeployments, in D_template's eigenbasis
+
+                                        for d_idx = 1:nDeployments
+                                            eig_i_d = Ki_full_eig{i}(:,d_idx);   % K x 1
+
+                                            for tr = 1:nTrials
+                                                rho_ref = D_template(:, t0_col_idx_per_trial(1,tr,d_idx));
+                                                rho_ref_v = U_D.' * rho_ref;   % K x 1, same eigenbasis
+
+                                                G_scalar = sum(rho_ref_v.^2 ./ eig_i_d);
+                                                c_scalar = sum(rho_ref_v .* u_i_v(:,tr,d_idx) ./ eig_i_d);
+                                                E_total  = sum(u_i_v(:,tr,d_idx).^2 ./ eig_i_d);
+
+                                                S_captured = c_scalar^2 / G_scalar;
+                                                T_align_all(1,i,tr,d_idx) = E_total - S_captured;
+                                            end
+                                        end
+                                    end
+
+                                    delta_fa_align = 5e-2;
+                                    T_align_threshold = chi2inv(1-delta_fa_align, K-1);   % K-1 DOF: one direction removed
+                                    align_flagged = T_align_all > T_align_threshold;
+                                    flagged = flagged | align_flagged;
+
                                     honest_idx = setdiff(1:S, attacker_idx);
 
                                     %% --- DIAGNOSTIC: isolate Nw-term and N0-term scaling in K_i ---
@@ -867,7 +919,9 @@ for experiment_idx = 1:numel(experiment_list)
 
                                                 % Order THIS trial's candidates by ITS OWN T_i --
                                                 % fully per-trial, no averaging across trials.
-                                                Ti_this = T_i_all(1,F,tr,d_idx);
+                                                Ti_this = T_i_all(1,F,tr,d_idx) / T_threshold ...
+                                                        + T_align_all(1,F,tr,d_idx) / T_align_threshold ...
+                                                        + 1e6 * sign_flagged(1,F,tr,d_idx);
                                                 [~, order] = sort(Ti_this(:), 'descend');
                                                 F_sorted = F(order.');
 
