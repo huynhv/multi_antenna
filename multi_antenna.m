@@ -1,6 +1,6 @@
 % Clear all variables and close all existing figures.
 clearvars
-% close all
+close all
 
 addpath('.\functions')
 
@@ -81,15 +81,12 @@ all_ti = sort(unifrnd(min_ti,max_ti,1,S_max,1,1,nDeployments),2,'ascend');
 % noise in place of the honest matched-filter output. Adaptable to multiple
 % simultaneous attackers by extending attacker_idx.
 attacker_enabled = true;
-attacker_idx     = 1;      % sensor index/indices (within 1:S) that are compromised
+attacker_idx     = [1];      % sensor index/indices (within 1:S) that are compromised
 attacker_db      = 0;      % attacker "SNR", same convention as agent_db (see below)
 use_greedy_validation = false;   % true: Lambda-validated greedy; false: face-value nulling
+peak_same_location = true;
 
-% One independent noise realization per potential attacker slot -- same shape
-% convention as all_w, so any subset of slots can be activated later without
-% regenerating anything.
-all_attacker_noise = randn(K,S_max,1,nTrials,nDeployments);
-
+%%
 selected_schemes = "EPC";
 
 % Define Rayleigh distribution parameters.
@@ -103,6 +100,116 @@ E_mi_sqr = (1/12) * (max_mi-min_mi)^2 + 0.5*(min_mi+max_mi);
 norm_fact = 1;
 epsilon = 1e-4;
 Bee = pi/Tp;
+
+%% Attacker waveform generation (Attacks 1, 2a/2b/2c, DC)
+% Generates all_attacker_noise per attack_type -- same shape convention the
+% rest of the pipeline already expects (K x S_max x 1 x nTrials x nDeployments),
+% so gamma_w_attacker/scaled_attacker_noise/the injection loop below need no
+% changes. Deterministic attacks (dc/square/sawtooth/sinusoid) draw ONE
+% independent set of parameters per potential attacker slot, reused across
+% every trial; only "noise" is redrawn per trial.
+attack_type = "flip";   % "noise" | "dc" | "square" | "sawtooth" | "sinusoid" | "peak" | "replay" | "flip"
+attacker_seed = 42;         % dedicated seed so this doesn't perturb other RNG draws
+
+rng(attacker_seed);
+
+f_nominal = Bee/(2*pi);   % = 1/(2*Tp), reference frequency near the honest passband
+
+switch attack_type
+    case "noise"
+        all_attacker_noise = randn(K,S_max,1,nTrials,nDeployments);
+
+    case "dc"
+        dc_sign = sign(randn(1,S_max));                    % 1 x S_max, one sign per slot
+        waveform = repmat(dc_sign, K, 1);                  % K x S_max
+        all_attacker_noise = repmat(reshape(waveform,K,S_max,1,1,1), 1,1,1,nTrials,nDeployments);
+
+    case "square"
+        f_c   = f_nominal * (0.5 + rand(1,S_max));         % 1 x S_max
+        phase = 2*pi*rand(1,S_max);
+        waveform = sign(sin(2*pi*t.*f_c + phase));         % K x S_max
+        all_attacker_noise = repmat(reshape(waveform,K,S_max,1,1,1), 1,1,1,nTrials,nDeployments);
+
+    case "sawtooth"
+        f_c        = f_nominal * (0.5 + rand(1,S_max));
+        phase_frac = rand(1,S_max);
+        phi = t.*f_c + phase_frac;
+        waveform = 2*(phi - floor(phi + 0.5));             % K x S_max, in [-1,1)
+        all_attacker_noise = repmat(reshape(waveform,K,S_max,1,1,1), 1,1,1,nTrials,nDeployments);
+
+    case "sinusoid"
+        f_c   = f_nominal * (0.5 + rand(1,S_max));
+        phase = 2*pi*rand(1,S_max);
+        waveform = sin(2*pi*t.*f_c + phase);               % K x S_max
+        all_attacker_noise = repmat(reshape(waveform,K,S_max,1,1,1), 1,1,1,nTrials,nDeployments);
+
+    case "peak"
+        % Concentrated single-sample spike. Location toggle:
+        %   peak_same_location = true  -> all attacker slots use ONE shared
+        %       draw (matches the manuscript's single-attacker worst case)
+        %   peak_same_location = false -> each slot independently randomized
+        candidate_locs = [dt, Tp];   % the two worst-case candidates identified earlier
+
+        if peak_same_location
+            loc = candidate_locs(randi(2));
+            peak_loc = repmat(loc, 1, S_max);
+        else
+            peak_loc = candidate_locs(randi(2, 1, S_max));
+        end
+
+        waveform = zeros(K, S_max);
+        for a = 1:S_max
+            [~, idx] = min(abs(t - peak_loc(a)));
+            waveform(idx, a) = 1;
+        end
+        all_attacker_noise = repmat(reshape(waveform,K,S_max,1,1,1), 1,1,1,nTrials,nDeployments);
+
+    case "replay"
+        % In-subspace / coherent replay: beta * rho(t - tau), tau drawn from
+        % the feasible delay window T = [0, t0_max] -- the SAME window the
+        % honest subspace itself is built from. By construction this is
+        % indistinguishable from an honest signal to EITHER defense (basis
+        % suppression or T_i) -- included as the known negative control /
+        % worst case, not something either defense is expected to catch.
+        t0_grid_full = repmat(reshape(t,1,1,[]), 1,1,1,nDeployments);
+        [~, R00_full] = mf_integral_fft(sensor_signal(t-t0_grid_full,Tp,norm_fact), sensor_signal(t,Tp,norm_fact), 1, 1, K, dt, Tp);
+        rho_dictionary = reshape(R00_full(:,:,:,1), K, K);   % rho(t - t_j), same construction as D_template
+
+        feasible_grid = t(t <= t0_max);
+        tau_per_slot = feasible_grid(randi(numel(feasible_grid), 1, S_max));
+
+        waveform = zeros(K, S_max);
+        for a = 1:S_max
+            [~, col_idx] = min(abs(t - tau_per_slot(a)));
+            waveform(:,a) = rho_dictionary(:, col_idx);
+        end
+        all_attacker_noise = repmat(reshape(waveform,K,S_max,1,1,1), 1,1,1,nTrials,nDeployments);
+
+    case "flip"
+        % Handled entirely at injection time below (needs the actual per-trial
+        % honest u_i(t), which doesn't exist yet at this point in the script).
+        % No independent waveform to generate or energy-normalize here.
+        all_attacker_noise = zeros(K,S_max,1,nTrials,nDeployments);   % unused placeholder
+
+    otherwise
+        error("Unknown attack_type: %s", attack_type);
+end
+
+%% Normalize EVERY attack type to unit total (dt-weighted) energy per slot,
+% BEFORE the shared attacker_db/gamma_w_attacker scaling is applied below.
+% Without this, concentrated waveforms (e.g. "peak") end up with far less
+% TOTAL energy than spread-out ones (noise/square/etc.) under the same
+% per-sample scale factor -- this keeps the energy convention genuinely
+% consistent across every attack type, matching what all attacks are
+% supposed to share.
+if attack_type ~= "flip"
+    waveform_energy = squeeze(sum(all_attacker_noise(:,:,1,1,1).^2, 1)) * dt;   % 1 x S_max
+    norm_factor = reshape(1./sqrt(waveform_energy), 1, S_max, 1, 1, 1);
+    all_attacker_noise = all_attacker_noise .* norm_factor;
+end
+
+rng(seed);
+
 w_psd_constant = 1;
 n_psd_constant = 1;
 N = 2*K - 1;
@@ -124,6 +231,12 @@ Psi = U_D(:, d_sub+1:end);       % K x (K-d_sub): its orthogonal complement -- f
 % "shape" of colored sensor noise projected into the residual space, needed
 % below to build each sensor's noise covariance K_i.
 Rss_Psi = Psi.' * D_template * Psi;   % (K-d_sub) x (K-d_sub)
+
+% Eigendecompose Rss_Psi ONCE, offline -- K_i = a*Rss_Psi + b*I always shares
+% these eigenvectors for ANY a,b, so K_i^-1 reduces to a cheap per-eigenvalue
+% reweight instead of a fresh (K-d_sub)^3 matrix inverse every time K_i is needed.
+[V_Rss, Lam_Rss] = eig((Rss_Psi+Rss_Psi.')/2);
+lam_Rss = diag(Lam_Rss);   % (K-d_sub) x 1
 
 fprintf('Subspace-projection residual test: d = %d, K-d = %d\n', d_sub, K-d_sub);
 
@@ -243,12 +356,24 @@ for experiment_idx = 1:numel(experiment_list)
                     noisy_unified_xi = alpha_true .* (mi_5d .* sensor_signal(t-t0_true, Tp, norm_fact)) + scaled_w(:,1:S,:,:,:);
                     % Compute ui here so we don't have to recompute FFT for each strat
                     [~, ui] = mf_integral_fft(noisy_unified_xi, mi_5d .* sensor_signal(t, Tp, norm_fact), 1, 1, K, dt, Tp);
+
                     %% --- Byzantine attacker: overwrite compromised sensor(s)' transmitted
                     % signal with unstructured noise, in place of their honest ui(t). ---
                     if attacker_enabled
                         active_attackers = attacker_idx(attacker_idx <= S);
-                        for a = active_attackers
-                            ui(:, a, :, :, :) = scaled_attacker_noise(:, a, :, :, :);
+                        if attack_type == "flip"
+                            % Sign-flip: -alpha * m_i^2 * rho(t-t0) - w_i(t). Still a
+                            % LINEAR member of the honest subspace S (span includes
+                            % negative scalings) -- provably undefeatable by either
+                            % defense, same category as "replay". Included as a
+                            % negative control, not a genuine test of detection.
+                            for a = active_attackers
+                                ui(:, a, :, :, :) = -ui(:, a, :, :, :);
+                            end
+                        else
+                            for a = active_attackers
+                                ui(:, a, :, :, :) = scaled_attacker_noise(:, a, :, :, :);
+                            end
                         end
                     end
                     % [~, ui_noise] = mf_integral_fft(scaled_w(:,1:S,:,:,:), mi_5d .* sensor_signal(t, Tp, norm_fact), 1, 1, K, dt, Tp);
@@ -371,16 +496,31 @@ for experiment_idx = 1:numel(experiment_list)
                             % it's reused across all nTrials below). ---
                             Nw_over_2 = scaled_w_psd_constant;   % == Nw/2
                             N0_over_2 = scaled_n_psd_constant / (2*dt);   % == N0/2
-                            Ki_inv_all = cell(S,1);
+                            % Ki_inv_all = cell(S,1);
+                            % for i = 1:S
+                            %     Ki_inv_d = zeros(K-d_sub, K-d_sub, nDeployments);
+                            %     for d_idx = 1:nDeployments
+                            %         mi_val = mi_5d(1,i,1,1,d_idx);
+                            %         norm_sq_i = sum(breve_g_all{i}(:,d_idx).^2);
+                            %         K_i = mi_val^2 * Nw_over_2 * Rss_Psi + (N0_over_2/norm_sq_i) * eye(K-d_sub);
+                            %         Ki_inv_d(:,:,d_idx) = inv(K_i);
+                            %     end
+                            %     Ki_inv_all{i} = Ki_inv_d;
+                            % end
+
+                            % K_i = a_i*Rss_Psi + b_i*I shares V_Rss's eigenvectors for ANY
+                            % a_i,b_i -- store only the per-sensor, per-deployment eigenvalue
+                            % reweighting, not full inverse matrices.
+                            Ki_diag_all = cell(S,1);
                             for i = 1:S
-                                Ki_inv_d = zeros(K-d_sub, K-d_sub, nDeployments);
+                                a_i = reshape(mi_5d(1,i,1,1,:).^2 * Nw_over_2, 1, nDeployments);
+                                norm_sq_i = zeros(1,nDeployments);
                                 for d_idx = 1:nDeployments
-                                    mi_val = mi_5d(1,i,1,1,d_idx);
-                                    norm_sq_i = sum(breve_g_all{i}(:,d_idx).^2);
-                                    K_i = mi_val^2 * Nw_over_2 * Rss_Psi + (N0_over_2/norm_sq_i) * eye(K-d_sub);
-                                    Ki_inv_d(:,:,d_idx) = inv(K_i);
+                                    norm_sq_i(d_idx) = sum(breve_g_all{i}(:,d_idx).^2);
                                 end
-                                Ki_inv_all{i} = Ki_inv_d;
+                                b_i = N0_over_2 ./ norm_sq_i;
+
+                                Ki_diag_all{i} = 1 ./ (lam_Rss .* a_i + b_i);   % (K-d_sub) x nDeployments
                             end
 
                             %%%%%%%%%%%%%%%%% ESTIMATION %%%%%%%%%%%%%%%%%
@@ -463,21 +603,36 @@ for experiment_idx = 1:numel(experiment_list)
                                     % out-of-Phi energy per sensor. T_i ~ chi^2_{K-d_sub}
                                     % under "sensor i honest" -- uses NEITHER alpha_true nor
                                     % t0_true anywhere in this computation. ---
+                                    % T_i_all = zeros(1, S, nTrials, nDeployments);
+                                    % for i = 1:S
+                                    %     u_i = reshape(hat_u_all(:,i,:,:), K, nTrials, nDeployments);
+                                    % 
+                                    %     % In-Phi part (what a matching honest shape explains)
+                                    %     % removed; Psi-coordinates of whatever's left.
+                                    %     proj_i = pagemtimes(Phi, pagemtimes(Phi.', u_i));
+                                    %     R_i_psi = pagemtimes(Psi.', u_i - proj_i);   % (K-d_sub) x nTrials x nDeployments
+                                    % 
+                                    %     R_i_row = reshape(R_i_psi, 1, K-d_sub, nTrials, nDeployments);
+                                    %     R_i_col = reshape(R_i_psi, K-d_sub, 1, nTrials, nDeployments);
+                                    %     Ki_inv_bcast = reshape(Ki_inv_all{i}, K-d_sub, K-d_sub, 1, nDeployments);
+                                    % 
+                                    %     % Whitened quadratic form: T_i = R_i^T * Ki^-1 * R_i
+                                    %     T_i_all(1,i,:,:) = pagemtimes(pagemtimes(R_i_row, Ki_inv_bcast), R_i_col);
+                                    % end
+
                                     T_i_all = zeros(1, S, nTrials, nDeployments);
                                     for i = 1:S
                                         u_i = reshape(hat_u_all(:,i,:,:), K, nTrials, nDeployments);
 
-                                        % In-Phi part (what a matching honest shape explains)
-                                        % removed; Psi-coordinates of whatever's left.
                                         proj_i = pagemtimes(Phi, pagemtimes(Phi.', u_i));
                                         R_i_psi = pagemtimes(Psi.', u_i - proj_i);   % (K-d_sub) x nTrials x nDeployments
 
-                                        R_i_row = reshape(R_i_psi, 1, K-d_sub, nTrials, nDeployments);
-                                        R_i_col = reshape(R_i_psi, K-d_sub, 1, nTrials, nDeployments);
-                                        Ki_inv_bcast = reshape(Ki_inv_all{i}, K-d_sub, K-d_sub, 1, nDeployments);
+                                        % Rotate into Rss_Psi's eigenbasis -- whitening is now an
+                                        % elementwise reweight, not a full (K-d_sub)x(K-d_sub) form.
+                                        R_i_v = pagemtimes(V_Rss.', R_i_psi);   % (K-d_sub) x nTrials x nDeployments
+                                        weights = reshape(Ki_diag_all{i}, K-d_sub, 1, nDeployments);
 
-                                        % Whitened quadratic form: T_i = R_i^T * Ki^-1 * R_i
-                                        T_i_all(1,i,:,:) = pagemtimes(pagemtimes(R_i_row, Ki_inv_bcast), R_i_col);
+                                        T_i_all(1,i,:,:) = reshape(sum((R_i_v.^2) .* weights, 1), 1,1,nTrials,nDeployments);
                                     end
 
                                     % Fixed, precomputed threshold -- same value for every
@@ -487,8 +642,83 @@ for experiment_idx = 1:numel(experiment_list)
                                     T_threshold = chi2inv(1-delta_fa, K-d_sub);
                                     flagged = T_i_all > T_threshold;   % 1 x S x nTrials x nDeployments logical
 
+                                    %% --- Practical hat_t0 for the sign-flip check: cheap
+                                    % undefended estimate from the SUM of isolated per-sensor
+                                    % signals, searched against every candidate delay in
+                                    % D_template. Own diagnostic use only -- not the final
+                                    % reported t0_hat. Same circularity caveat as T_i^align.
+                                    
+                                    %%% Crude estimate for hat_t0
+                                    % u_sum = reshape(sum(hat_u_all, 2), K, nTrials, nDeployments);   % K x nTrials x nDeployments
+                                    % corr_vs_grid = dt * pagemtimes(D_template.', reshape(u_sum, K, nTrials*nDeployments));   % K x (nTrials*nDeployments)
+                                    % [~, best_col] = max(corr_vs_grid, [], 1);
+                                    % t0_col_idx_per_trial = reshape(best_col, 1, nTrials, nDeployments);
+
+                                    %% --- Practical hat_t0 for the sign-flip check: robust
+                                    % version. (1) EXCLUDES sensors already flagged by T_i --
+                                    % an attacker whose shape already failed T_i should not
+                                    % pollute this timing estimate. (2) Uses the MEDIAN of
+                                    % independent PER-SENSOR delay estimates, not a raw sum --
+                                    % exploits |B| < S/2 directly, so a minority of attackers
+                                    % (even unflagged ones) cannot bias it. Own diagnostic use
+                                    % only -- not the final reported t0_hat. Same circularity
+                                    % caveat as T_i^align: still uses raw, unscreened DATA for
+                                    % T_i itself, just no longer double-counts already-flagged
+                                    % sensors on top of that.
+                                    corr_per_sensor = dt * pagemtimes(D_template.', reshape(hat_u_all, K, S*nTrials*nDeployments));   % K x (S*nTrials*nDeployments)
+                                    [~, best_col_per_sensor] = max(corr_per_sensor, [], 1);
+                                    t0_col_idx_per_sensor = reshape(best_col_per_sensor, S, nTrials, nDeployments);   % per-sensor delay guess
+
+                                    t0_col_idx_per_trial = zeros(1, nTrials, nDeployments);
+                                    for d_idx = 1:nDeployments
+                                        for tr = 1:nTrials
+                                            already_flagged = find(flagged(1,:,tr,d_idx));
+                                            candidates = setdiff(1:S, already_flagged);
+                                            if isempty(candidates)
+                                                candidates = 1:S;   % fallback: everyone flagged, use all anyway
+                                            end
+                                            t0_col_idx_per_trial(1,tr,d_idx) = round(median(t0_col_idx_per_sensor(candidates,tr,d_idx)));
+                                        end
+                                    end
+
+                                    %% --- Sign-flip defense ---
+                                    % Correlate each sensor's recovered signal against the
+                                    % KNOWN template rho(t-t0_true) -- not against t0_true
+                                    % itself, but the one column of D_template nearest it.
+                                    % Design note: using t0_true (rather than the array's own
+                                    % data-derived t0_hat) sidesteps the circularity concern
+                                    % discussed earlier -- a real deployment would substitute
+                                    % a pre-established/robustified consensus t0 here instead.
+                                    % Sign is robust to small t0 error, so this is a reasonable
+                                    % simplification for this first pass. An honest sensor's
+                                    % correlation is unconditionally positive; a sign-flipped
+                                    % attacker's is unconditionally negative -- no calibration,
+                                    % no threshold tuning needed, unlike T_i.
+                                    
+                                    % t0_proxy = t0_true;
+                                    % [~, t0_col_idx] = min(abs(t - t0_proxy));
+                                    % rho_ref = D_template(:, t0_col_idx);   % K x 1, rho(t - t0_true)
+                                    % hat_c_all = zeros(1, S, nTrials, nDeployments);
+                                    % for i = 1:S
+                                    %     u_i = reshape(hat_u_all(:,i,:,:), K, nTrials, nDeployments);
+                                    %     hat_c_all(1,i,:,:) = dt * reshape(rho_ref.' * reshape(u_i,K,[]), 1,1,nTrials,nDeployments);
+                                    % end
+
+                                    hat_c_all = zeros(1, S, nTrials, nDeployments);
+                                    for i = 1:S
+                                        u_i = reshape(hat_u_all(:,i,:,:), K, nTrials, nDeployments);
+                                        for d_idx = 1:nDeployments
+                                            for tr = 1:nTrials
+                                                rho_ref = D_template(:, t0_col_idx_per_trial(1,tr,d_idx));
+                                                hat_c_all(1,i,tr,d_idx) = dt * (rho_ref.' * u_i(:,tr,d_idx));
+                                            end
+                                        end
+                                    end
+
+                                    sign_flagged = hat_c_all < 0;   % 1 x S x nTrials x nDeployments logical
+                                    flagged = flagged | sign_flagged;   % combine with the existing T_i-based flag
+
                                     honest_idx = setdiff(1:S, attacker_idx);
-                                    empirical_fa_rate = mean(flagged(1,honest_idx,:,:), 'all');
 
                                     %% --- DIAGNOSTIC: isolate Nw-term and N0-term scaling in K_i ---
                                     % diag_sensor = setdiff(1:S, attacker_idx); diag_sensor = diag_sensor(1);   % an honest sensor
@@ -616,25 +846,31 @@ for experiment_idx = 1:numel(experiment_list)
                                     alpha_final = alpha_estimates;
                                     t0_final = t0_estimates_for_plot;
 
-                                    geom_cache = containers.Map('KeyType','char','ValueType','any');
+                                    if use_greedy_validation
+                                        % --- Greedy, Lambda-validated: genuinely per-trial, since
+                                        % accept/reject depends on each trial's own noise realization
+                                        % (see prior discussion -- grouping here would be invalid). ---
+                                        geom_cache = containers.Map('KeyType','char','ValueType','any');
 
-                                    accepted_count = 0;
-                                    rejected_count = 0;
+                                        accepted_count = 0;
+                                        rejected_count = 0;
+                                        tp_total = 0;
+                                        fp_total = 0;
+                                        fn_total = 0;
 
-                                    for d_idx = 1:nDeployments
-                                        for tr = 1:nTrials
-                                            F = excluded_sets{tr,d_idx};
-                                            if isempty(F)
-                                                continue   % nothing flagged -- keep undefended estimate
-                                            end
+                                        for d_idx = 1:nDeployments
+                                            for tr = 1:nTrials
+                                                F = excluded_sets{tr,d_idx};
+                                                if isempty(F)
+                                                    continue   % nothing flagged -- keep undefended estimate
+                                                end
 
-                                            % Order THIS trial's candidates by ITS OWN T_i --
-                                            % fully per-trial, no averaging across trials.
-                                            Ti_this = T_i_all(1,F,tr,d_idx);
-                                            [~, order] = sort(Ti_this(:), 'descend');
-                                            F_sorted = F(order.');
+                                                % Order THIS trial's candidates by ITS OWN T_i --
+                                                % fully per-trial, no averaging across trials.
+                                                Ti_this = T_i_all(1,F,tr,d_idx);
+                                                [~, order] = sort(Ti_this(:), 'descend');
+                                                F_sorted = F(order.');
 
-                                            if use_greedy_validation
                                                 current_A      = [];
                                                 current_alpha  = alpha_estimates(1,1,tr,d_idx);
                                                 current_t0     = t0_estimates_for_plot(1,1,tr,d_idx);
@@ -664,31 +900,66 @@ for experiment_idx = 1:numel(experiment_list)
                                                         rejected_count = rejected_count + 1;
                                                     end
                                                 end
-                                            else
-                                                % Face value: null everyone flagged, no validation.
-                                                current_A = F;
-                                                key = sprintf('%d_%s', d_idx, mat2str(sort(current_A)));
 
-                                                if isKey(geom_cache, key)
-                                                    geom = geom_cache(key);
-                                                else
-                                                    geom = build_null_geometry(current_A, mi_5d, g_tilde, gamma_w, gamma_n, Hm_arr, omega, dt, K, S, d_idx);
-                                                    geom_cache(key) = geom;
+                                                true_positive  = numel(intersect(current_A, attacker_idx));
+                                                false_positive = numel(setdiff(current_A, attacker_idx));
+                                                false_negative = numel(setdiff(attacker_idx, current_A));
+                                                tp_total = tp_total + true_positive;
+                                                fp_total = fp_total + false_positive;
+                                                fn_total = fn_total + false_negative;
+
+                                                if ~isempty(current_A)
+                                                    alpha_final(1,1,tr,d_idx) = current_alpha;
+                                                    t0_final(1,1,tr,d_idx) = current_t0;
                                                 end
-
-                                                [current_alpha, current_t0, ~] = estimate_with_geometry(geom, y, K, N, Tp, ...
-                                                    norm_fact, t, t0_true, mfTemplateFFT_raw, D_template, tr, d_idx, dt);
-                                            end
-
-                                            if ~isempty(current_A)
-                                                alpha_final(1,1,tr,d_idx) = current_alpha;
-                                                t0_final(1,1,tr,d_idx) = current_t0;
                                             end
                                         end
-                                    end
 
-                                    fprintf('Greedy validation: %d accepted, %d rejected (%d distinct null-geometries built and cached)\n', ...
-                                        accepted_count, rejected_count, geom_cache.Count);
+                                        fprintf('Greedy validation: %d accepted, %d rejected (%d distinct null-geometries built and cached)\n', ...
+                                            accepted_count, rejected_count, geom_cache.Count);
+                                        fprintf('Detection accuracy: TP=%d, FP=%d, FN=%d\n', tp_total, fp_total, fn_total);
+                                    else
+                                        % --- Face value: no per-trial decision to make, so group
+                                        % trials by their EXACT flagged set and process each group
+                                        % in ONE batched call -- both geometry-building AND
+                                        % estimation are shared across every trial in the group. ---
+                                        num_geometries_built = 0;
+                                        tp_total = 0;
+                                        fp_total = 0;
+                                        fn_total = 0;
+
+                                        for d_idx = 1:nDeployments
+                                            [unique_sets, group_idx] = unique_cell_sets(excluded_sets(:,d_idx));
+
+                                            for g = 1:numel(unique_sets)
+                                                A = unique_sets{g};
+                                                if isempty(A)
+                                                    continue   % nothing flagged -- keep undefended estimate
+                                                end
+
+                                                trial_members = find(group_idx == g);
+
+                                                geom = build_null_geometry(A, mi_5d, g_tilde, gamma_w, gamma_n, Hm_arr, omega, dt, K, S, d_idx);
+                                                num_geometries_built = num_geometries_built + 1;
+
+                                                [alpha_A, t0_A, ~] = estimate_with_geometry(geom, y, K, N, Tp, ...
+                                                    norm_fact, t, t0_true, mfTemplateFFT_raw, D_template, trial_members, d_idx, dt);
+
+                                                true_positive  = numel(intersect(A, attacker_idx));
+                                                false_positive = numel(setdiff(A, attacker_idx));
+                                                false_negative = numel(setdiff(attacker_idx, A));
+                                                tp_total = tp_total + true_positive * numel(trial_members);
+                                                fp_total = fp_total + false_positive * numel(trial_members);
+                                                fn_total = fn_total + false_negative * numel(trial_members);
+
+                                                alpha_final(1,1,trial_members,d_idx) = alpha_A;
+                                                t0_final(1,1,trial_members,d_idx) = t0_A;
+                                            end
+                                        end
+
+                                        fprintf('Face-value nulling: %d distinct null-geometries built across all deployments\n', num_geometries_built);
+                                        fprintf('Detection accuracy: TP=%d, FP=%d, FN=%d\n', tp_total, fp_total, fn_total);
+                                    end
 
                                     alpha_estimates = alpha_final;
                                     t0_estimates_for_plot = t0_final;
@@ -869,6 +1140,28 @@ for experiment_idx = 1:numel(experiment_list)
 end
 
 %% Functions
+function log_msg(verbosity_level, level, fmt, varargin)
+% level 1 = major section (scheme/agent-SNR/experiment boundaries)
+% level 2 = sub-step (channel SNR point, per-block timing)
+% level 3 = detail/diagnostic (per-strategy, T_i/geometry/detection stats)
+if level > verbosity_level
+    return
+end
+indent = repmat('  ', 1, level-1);
+switch level
+    case 1
+        prefix = sprintf('\n%s=== ', indent);
+        suffix = ' ===';
+    case 2
+        prefix = sprintf('%s-- ', indent);
+        suffix = '';
+    otherwise
+        prefix = sprintf('%s   ', indent);
+        suffix = '';
+end
+fprintf([prefix fmt suffix '\n'], varargin{:});
+end
+
 function geom = build_null_geometry(A, mi_5d, g_tilde, gamma_w, gamma_n, Hm_arr, omega, dt, K, S, d_idx)
 % Everything needed to null set A and estimate for deployment d_idx -- depends
 % ONLY on A and d_idx (and gamma_w/gamma_n, fixed for the current channel-SNR
@@ -878,6 +1171,10 @@ function geom = build_null_geometry(A, mi_5d, g_tilde, gamma_w, gamma_n, Hm_arr,
 num_antennas = size(g_tilde,3);
 Mtot_full = 2*num_antennas;
 retained = setdiff(1:S, A);
+
+if numel(A) >= Mtot_full
+    error('Cannot null %d sensors with only %d real antenna dimensions.', numel(A), Mtot_full);
+end
 
 g_full = reshape(g_tilde(1,1:S,:,1,d_idx), S, num_antennas);
 G_R_full = permute(cat(2, real(g_full), imag(g_full)), [2,1]);   % Mtot_full x S
