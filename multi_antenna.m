@@ -1,8 +1,10 @@
+%% LEFT OFF HERE 9/2/2026 --> you figured out how to generate the channels, need to verify that the current defenses still work and change the delta_fa_align back to see if coherent defense still works. Start working on amplitude lying defense...
 % Clear all variables and close all existing figures.
 clearvars
 close all
 
 addpath('.\functions')
+verbosity_level = 5;   % 1 = major sections only, 2 = + sub-steps/channel-SNR, 3 = + diagnostics
 
 % Set seed for reproducibility
 seed = 22;
@@ -44,23 +46,8 @@ Ps = integral(func,0,T0)/T0;
 alpha_true = 2;
 t0_true = 1;
 
-% Define range for distribution of mi and ti (tau_i)
-max_mi = 1;
-min_mi = 0.5;
-
-max_ti = 1;
-min_ti = 0;
-
-% Set maximum value of t0 such that the signal from each sensor is guaranteed to
-% be in the interior of the observation period.
-t0_max = T0-Tp-max_ti;
-
-if t0_true > t0_max
-    error("True value of t0 exceeds maximum!")
-end
-
 % Set the number of antennas
-num_antennas = 8;
+num_antennas = 10;
 Mtot = 2*num_antennas;
 
 %%% Always generate w, n, and channel gain for maximum S, then use subsets for different S trials
@@ -72,9 +59,46 @@ n = (randn(K,1,num_antennas,nTrials,nDeployments) + 1i*randn(K,1,num_antennas,nT
 % Generate channel gains.
 all_gi = (randn(1,S_max,num_antennas,1,nDeployments) + 1i*randn(1,S_max,num_antennas,1,nDeployments))/sqrt(2);
 
-% Generate mi and ti.
-all_mi = sort(unifrnd(min_mi,max_mi,1,S_max,1,1,nDeployments),2,'descend');
-all_ti = sort(unifrnd(min_ti,max_ti,1,S_max,1,1,nDeployments),2,'ascend');
+% Define range for distribution of mi and ti (tau_i)
+% max_mi = 1;
+% min_mi = 0.5;
+
+max_ti = 1;
+min_ti = 0.5; 
+
+%% Generate mi and ti
+% Distance-first: ti (= di, v=1) sampled directly since max_ti is the true
+% structural constraint (bounded by the fixed observation window). mi is
+% DERIVED from di via a physical path-loss + shadowing model, so it remains
+% an independent, non-circular quantity for the geometric defense to test
+% against later (g(d_i) vs. the sensor's implied amplitude).
+path_loss_exp = 1;
+shadow_sigma_dB = 1;
+
+m_ref = 1;              % reference amplitude at distance min_ti
+c_gain = m_ref * min_ti^path_loss_exp;   % anchors: unshadowed mi = m_ref at d = min_ti
+
+all_di = sort(unifrnd(min_ti, max_ti, 1, S_max, 1, 1, nDeployments), 2, 'ascend');
+all_ti = all_di;   % v = 1, per earlier discussion
+
+shadowing = 10.^(shadow_sigma_dB/20 * randn(1,S_max,1,1,nDeployments));
+all_mi = c_gain ./ (all_di.^path_loss_exp) .* shadowing;
+
+% Diagnostic: confirm mi's mean stays representative (mean/median should be
+% reasonably close; large divergence signals a heavy tail that would make
+% E_mi_sqr, and hence gamma_n/Ki, poorly calibrated -- same issue found
+% earlier when mi was fully unbounded).
+log_msg(verbosity_level, 3, 'mi: mean=%.4f, median=%.4f, std=%.4f', ...
+    mean(all_mi(:)), median(all_mi(:)), std(all_mi(:)));
+log_msg(verbosity_level, 3, 'E[mi^2] via mean vs. median^2: %.4f vs %.4f', ...
+    mean(all_mi(:).^2), median(all_mi(:))^2);
+
+% Deterministic path-loss spread vs. shadowing -- shadowing should be a
+% modest perturbation, not large enough to make near/far reordering routine.
+det_spread_dB = 20*log10( (c_gain/min_ti^path_loss_exp) / (c_gain/max_ti^path_loss_exp) );
+log_msg(verbosity_level, 3, 'Deterministic path-loss spread: %.1f dB | Shadowing std dev: %.1f dB', ...
+    det_spread_dB, shadow_sigma_dB);
+
 
 %% Byzantine attacker configuration
 % Attacker(s) hijack existing sensor slots and transmit unstructured (random)
@@ -83,9 +107,10 @@ all_ti = sort(unifrnd(min_ti,max_ti,1,S_max,1,1,nDeployments),2,'ascend');
 attacker_enabled = true;
 attacker_idx     = [1];      % sensor index/indices (within 1:S) that are compromised
 attacker_db      = 0;      % attacker "SNR", same convention as agent_db (see below)
+attacker_seed = 42;
+
 use_greedy_validation = false;   % true: Lambda-validated greedy; false: face-value nulling
 peak_same_location = true;
-
 %%
 selected_schemes = "EPC";
 
@@ -94,12 +119,22 @@ rayleigh_factor = 1/sqrt(2);
 E_mag_g_sqr = 2*rayleigh_factor^2;
 
 % Define expected value of mi^2.
-E_mi_sqr = (1/12) * (max_mi-min_mi)^2 + 0.5*(min_mi+max_mi);
+% E_mi_sqr = (1/12) * (max_mi-min_mi)^2 + 0.5*(min_mi+max_mi);
+
+E_mi_sqr = mean(all_mi(:).^2);
 
 % Set miscellaneous parameters
 norm_fact = 1;
 epsilon = 1e-4;
 Bee = pi/Tp;
+
+% Set maximum value of t0 such that the signal from each sensor is guaranteed to
+% be in the interior of the observation period.
+t0_max = T0-Tp-max_ti;
+
+if t0_true > t0_max
+    error("True value of t0 exceeds maximum!")
+end
 
 %% Attacker waveform generation (Attacks 1, 2a/2b/2c, DC)
 % Generates all_attacker_noise per attack_type -- same shape convention the
@@ -108,9 +143,8 @@ Bee = pi/Tp;
 % changes. Deterministic attacks (dc/square/sawtooth/sinusoid) draw ONE
 % independent set of parameters per potential attacker slot, reused across
 % every trial; only "noise" is redrawn per trial.
-attack_type = "replay";   % "noise" | "dc" | "square" | "sawtooth" | "sinusoid" | "peak" | "replay" | "flip"
-attacker_seed = 42;         % dedicated seed so this doesn't perturb other RNG draws
-
+attack_type = "replay";   % "noise" | "dc" | "square" | "sawtooth" | "sinusoid" | "peak" | "flip" | "replay" | "amplitude"
+attacker_beta = 1;
 rng(attacker_seed);
 
 f_nominal = Bee/(2*pi);   % = 1/(2*Tp), reference frequency near the honest passband
@@ -192,6 +226,14 @@ switch attack_type
         % No independent waveform to generate or energy-normalize here.
         all_attacker_noise = zeros(K,S_max,1,nTrials,nDeployments);   % unused placeholder
 
+    case "amplitude"
+        % Same reasoning as "flip" -- this attack SCALES the actual honest
+        % u_i(t) rather than transmitting an independent waveform, so it must
+        % be handled at injection time below (needs the real per-trial honest
+        % signal, which doesn't exist yet here). No independent waveform to
+        % generate or energy-normalize.
+        all_attacker_noise = zeros(K,S_max,1,nTrials,nDeployments);   % unused placeholder
+
     otherwise
         error("Unknown attack_type: %s", attack_type);
 end
@@ -244,7 +286,7 @@ lam_Rss = diag(Lam_Rss);   % (K-d_sub) x 1
 % rather than the full Phi/Psi split, for the coherent-replay (T_i^align) test.
 lam_D = diag(Sigma_D);   % K x 1
 
-fprintf('Subspace-projection residual test: d = %d, K-d = %d\n', d_sub, K-d_sub);
+log_msg(verbosity_level, 1, 'Subspace-projection residual test: d = %d, K-d = %d', d_sub, K-d_sub);
 
 %% Define Anonymous Expressions
 mag_sqr_S0_internal = @(w) (norm_fact^2) * (2*Bee.^2 .* (1 + cos(w.*pi./Bee)) ) ./ (w.^2 - Bee.^2).^2;
@@ -278,7 +320,7 @@ for experiment_idx = 1:numel(experiment_list)
 
     pad_str = '----------';
     msg = [pad_str  ' ' 'Running: ' char(experiment) ' ' pad_str];
-    fprintf('\n%s\n', msg);
+    log_msg(verbosity_level, 1, '%s', msg);
 
     % Configure strategies
     agent_db_values = 0;
@@ -322,7 +364,7 @@ for experiment_idx = 1:numel(experiment_list)
     rho_empirical_bias = rho_crlb;
 
     % Start run timer
-    disp("Starting runtime...")
+    log_msg(verbosity_level, 1, 'Starting runtime...');
     loopTic = tic;
     
     % Iterate through agent snr values.
@@ -375,6 +417,16 @@ for experiment_idx = 1:numel(experiment_list)
                             % negative control, not a genuine test of detection.
                             for a = active_attackers
                                 ui(:, a, :, :, :) = -ui(:, a, :, :, :);
+                            end
+                        elseif attack_type == "amplitude"
+                            % General amplitude lie: beta * alpha * m_i^2 * rho(t-t0) +
+                            % beta * w_i(t) -- CORRECT t0, CORRECT shape, WRONG magnitude.
+                            % Passes T_i (correct shape), sign-flip (positive if beta>0),
+                            % and T_i^align (correct timing) -- undefeatable by any
+                            % content-only test. Target case for the geometric/position
+                            % defense, not yet implemented.
+                            for a = active_attackers
+                                ui(:, a, :, :, :) = attacker_beta * ui(:, a, :, :, :);
                             end
                         else
                             for a = active_attackers
@@ -480,11 +532,8 @@ for experiment_idx = 1:numel(experiment_list)
                             channel_db_start = tic;
     
                             % Print statement for at-a-glance performance.
-                            disp('')
-                            disp("=== " + scheme + " ===")
-                            disp("** Agent SNR = " + (agent_db_values(agent_db_idx)) + " dB **")
-                            disp("** Channel SNR = " + (channel_db_values(scheme_idx,channel_db_idx,agent_db_idx)) + " dB **")
-                            disp("** S = " + S + ", Dropout = " + dropout_vals(dropout_idx) + " **")
+                            log_msg(verbosity_level, 2, 'Scheme %s | Agent SNR = %d dB | Channel SNR = %g dB | S = %d | Dropout = %d', ...
+                                scheme, agent_db_values(agent_db_idx), channel_db_values(scheme_idx,channel_db_idx,agent_db_idx), S, dropout_vals(dropout_idx));
 
                             if scheme == "EPC"
                                 gamma_n = (dt/n_psd_constant) * Ps * E_mi_sqr * E_mag_g_sqr / db2magTen(channel_db_values(scheme_idx,channel_db_idx,agent_db_idx));
@@ -541,18 +590,17 @@ for experiment_idx = 1:numel(experiment_list)
                             %%%%%%%%%%%%%%%%% ESTIMATION %%%%%%%%%%%%%%%%%
                             total_est_start = tic;
     
-                            disp("Begin ML estimation...")
+                            log_msg(verbosity_level, 3, 'Begin ML estimation');
                             for strat_idx = 1:num_strats
                                 strat = all_strats(strat_idx);
-                                disp("Running ML estimation for " + strat + " | obj = " + obj_func)
+                                log_msg(verbosity_level, 4, 'Running ML estimation for %s | obj = %s', strat, obj_func);
         
                                 ai = 1;
                                 bi = 0;
 
                                 y = pagetranspose(out_cws + scaled_n);
 
-                                %%% Baseline single-antenna case from
-                                %%% previous manuscripts
+                                %%% Baseline single-antenna case from previous manuscripts
                                 if use_W == false
                                     ci = real(reshape(g_tilde, 1, S, 1, nDeployments));
                                     y_m = reshape(y, 1, K, nTrials, nDeployments);
@@ -765,7 +813,7 @@ for experiment_idx = 1:numel(experiment_list)
                                         end
                                     end
 
-                                    delta_fa_align = 5e-2;
+                                    delta_fa_align = 1e-6;
                                     T_align_threshold = chi2inv(1-delta_fa_align, K-1);   % K-1 DOF: one direction removed
                                     align_flagged = T_align_all > T_align_threshold;
                                     flagged = flagged | align_flagged;
@@ -969,9 +1017,9 @@ for experiment_idx = 1:numel(experiment_list)
                                             end
                                         end
 
-                                        fprintf('Greedy validation: %d accepted, %d rejected (%d distinct null-geometries built and cached)\n', ...
+                                        log_msg(verbosity_level, 4, 'Greedy validation: %d accepted, %d rejected (%d distinct null-geometries built and cached)', ...
                                             accepted_count, rejected_count, geom_cache.Count);
-                                        fprintf('Detection accuracy: TP=%d, FP=%d, FN=%d\n', tp_total, fp_total, fn_total);
+                                        log_msg(verbosity_level, 4, 'Detection accuracy: TP=%d, FP=%d, FN=%d', tp_total, fp_total, fn_total);
                                     else
                                         % --- Face value: no per-trial decision to make, so group
                                         % trials by their EXACT flagged set and process each group
@@ -1011,8 +1059,17 @@ for experiment_idx = 1:numel(experiment_list)
                                             end
                                         end
 
-                                        fprintf('Face-value nulling: %d distinct null-geometries built across all deployments\n', num_geometries_built);
-                                        fprintf('Detection accuracy: TP=%d, FP=%d, FN=%d\n', tp_total, fp_total, fn_total);
+                                        log_msg(verbosity_level, 4, 'Face-value nulling: %d distinct null-geometries built across all deployments', num_geometries_built);
+                                        log_msg(verbosity_level, 4, 'Detection accuracy: TP=%d, FP=%d, FN=%d', tp_total, fp_total, fn_total);
+
+                                        honest_idx_diag = setdiff(1:S, attacker_idx);
+                                        fp_Ti     = mean(T_i_all(1,honest_idx_diag,:,:) > T_threshold, 'all');
+                                        fp_sign   = mean(sign_flagged(1,honest_idx_diag,:,:), 'all');
+                                        fp_align  = mean(align_flagged(1,honest_idx_diag,:,:), 'all');
+                                        fp_combined = mean(flagged(1,honest_idx_diag,:,:), 'all');
+
+                                        log_msg(verbosity_level, 4, 'FP rate -- T_i: %.4f | sign: %.4f | align: %.4f | combined: %.4f', ...
+                                            fp_Ti, fp_sign, fp_align, fp_combined);
                                     end
 
                                     alpha_estimates = alpha_final;
@@ -1045,11 +1102,12 @@ for experiment_idx = 1:numel(experiment_list)
                                 end
                             end
                             total_est_time = toc(total_est_start);
-                            disp("Total ML estimation time: " + floor(total_est_time/60) + " minutes " + mod(total_est_time,60) + " seconds")
+                            log_msg(verbosity_level, 3, 'Total ML estimation time: %dm %.1fs', floor(total_est_time/60), mod(total_est_time,60));
+                        
+                            total_channel_db_time = toc(channel_db_start);
+                            log_msg(verbosity_level, 3, 'Runtime for channel SNR = %g dB: %dm %.1fs\n', ...
+                                channel_db_values(scheme_idx,channel_db_idx,agent_db_idx), floor(total_channel_db_time/60), mod(total_channel_db_time,60));
                         end
-                        total_channel_db_time = toc(channel_db_start);
-                        disp("Total runtime for channel SNR = " + (channel_db_values(scheme_idx,channel_db_idx,agent_db_idx)) + " dB: " + floor(total_channel_db_time/60) + " minutes " + mod(total_channel_db_time,60) + " seconds")
-                        fprintf("\n");
                     end
                 end
             end
@@ -1059,7 +1117,7 @@ for experiment_idx = 1:numel(experiment_list)
     % Stop run timer.
     runtime = toc(loopTic);
     % Display total run time.
-    disp(experiment + " took " + floor(runtime/60) + " minutes " + mod(runtime,60) + " seconds")
+    log_msg(verbosity_level, 1, '%s took %dm %.1fs', experiment, floor(runtime/60), mod(runtime,60));
     
     %% Compute averages across deployments.
     if nDeployments == 1
@@ -1198,6 +1256,8 @@ function log_msg(verbosity_level, level, fmt, varargin)
 % level 1 = major section (scheme/agent-SNR/experiment boundaries)
 % level 2 = sub-step (channel SNR point, per-block timing)
 % level 3 = detail/diagnostic (per-strategy, T_i/geometry/detection stats)
+% level 4 = fine-grained (per-sensor, per-candidate detail)
+% level 5 = trace (innermost loop, per-trial/per-iteration detail)
 if level > verbosity_level
     return
 end
@@ -1208,6 +1268,15 @@ switch level
         suffix = ' ===';
     case 2
         prefix = sprintf('%s-- ', indent);
+        suffix = '';
+    case 3
+        prefix = sprintf('%s.. ', indent);
+        suffix = '';
+    case 4
+        prefix = sprintf('%s.... ', indent);
+        suffix = '';
+    case 5
+        prefix = sprintf('%s...... ', indent);
         suffix = '';
     otherwise
         prefix = sprintf('%s   ', indent);
