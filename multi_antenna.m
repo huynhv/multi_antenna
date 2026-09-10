@@ -1,4 +1,7 @@
-%% LEFT OFF HERE 9/2/2026 --> you figured out how to generate the channels, need to verify that the current defenses still work and change the delta_fa_align back to see if coherent defense still works. Start working on amplitude lying defense...
+% 9/3/2026 LEFT OFF HERE: atp it seems like jamming and flipping are
+% solved, the more open-ended attacks are the arbitrary time shift and
+% amplitude scaling
+
 % Clear all variables and close all existing figures.
 clearvars
 close all
@@ -99,18 +102,6 @@ det_spread_dB = 20*log10( (c_gain/min_ti^path_loss_exp) / (c_gain/max_ti^path_lo
 log_msg(verbosity_level, 3, 'Deterministic path-loss spread: %.1f dB | Shadowing std dev: %.1f dB', ...
     det_spread_dB, shadow_sigma_dB);
 
-
-%% Byzantine attacker configuration
-% Attacker(s) hijack existing sensor slots and transmit unstructured (random)
-% noise in place of the honest matched-filter output. Adaptable to multiple
-% simultaneous attackers by extending attacker_idx.
-attacker_enabled = true;
-attacker_idx     = [1];      % sensor index/indices (within 1:S) that are compromised
-attacker_db      = 0;      % attacker "SNR", same convention as agent_db (see below)
-attacker_seed = 42;
-
-use_greedy_validation = false;   % true: Lambda-validated greedy; false: face-value nulling
-peak_same_location = true;
 %%
 selected_schemes = "EPC";
 
@@ -136,15 +127,26 @@ if t0_true > t0_max
     error("True value of t0 exceeds maximum!")
 end
 
-%% Attacker waveform generation (Attacks 1, 2a/2b/2c, DC)
+%% Byzantine attacker configuration
+% Attacker(s) hijack existing sensor slots and transmit unstructured (random)
+% noise in place of the honest matched-filter output. Adaptable to multiple
+% simultaneous attackers by extending attacker_idx.
+
 % Generates all_attacker_noise per attack_type -- same shape convention the
 % rest of the pipeline already expects (K x S_max x 1 x nTrials x nDeployments),
 % so gamma_w_attacker/scaled_attacker_noise/the injection loop below need no
 % changes. Deterministic attacks (dc/square/sawtooth/sinusoid) draw ONE
 % independent set of parameters per potential attacker slot, reused across
 % every trial; only "noise" is redrawn per trial.
-attack_type = "replay";   % "noise" | "dc" | "square" | "sawtooth" | "sinusoid" | "peak" | "flip" | "replay" | "amplitude"
-attacker_beta = 1;
+attacker_enabled = true;
+attacker_idx     = [1];      % sensor index/indices (within 1:S) that are compromised
+attacker_db      = 0;      % attacker "SNR", same convention as agent_db (see below)
+attacker_seed = 42;
+
+use_greedy_validation = false;   % true: Lambda-validated greedy; false: face-value nulling
+peak_same_location = true;
+attack_type = "noise";   % "noise" | "dc" | "square" | "sawtooth" | "sinusoid" | "peak" | "flip" | "replay" | "amplitude"
+attacker_beta = 10;
 rng(attacker_seed);
 
 f_nominal = Bee/(2*pi);   % = 1/(2*Tp), reference frequency near the honest passband
@@ -362,6 +364,7 @@ for experiment_idx = 1:numel(experiment_list)
     rho_empirical_var = rho_crlb;
     rho_empirical_mse = rho_crlb;
     rho_empirical_bias = rho_crlb;
+    rho_empirical_mse_undefended = rho_crlb;   % MSE with NO defense applied -- only meaningful/populated under attack
 
     % Start run timer
     log_msg(verbosity_level, 1, 'Starting runtime...');
@@ -818,6 +821,117 @@ for experiment_idx = 1:numel(experiment_list)
                                     align_flagged = T_align_all > T_align_threshold;
                                     flagged = flagged | align_flagged;
 
+                                    %% --- Cross-sensor correlation consistency (Flagging IV) ---
+                                    % Honest sensors are all copies of the SAME rho(t-bar_t0), so
+                                    % they should correlate strongly with EACH OTHER, independent
+                                    % of any noise-covariance model K_i. Fails differently than
+                                    % T_i^align -- no whitening model needed at all -- so this is a
+                                    % genuine backstop, not a repeat of the same mechanism.
+                                    gram = dt * pagemtimes(pagetranspose(hat_u_all), hat_u_all);   % S x S x nTrials x nDeployments
+
+                                    norm_sq = zeros(1,S,nTrials,nDeployments);
+                                    for s = 1:S
+                                        norm_sq(1,s,:,:) = gram(s,s,:,:);
+                                    end
+                                    norm_col = reshape(norm_sq, S,1,nTrials,nDeployments);
+                                    norm_row = reshape(norm_sq, 1,S,nTrials,nDeployments);
+                                    denom_corr = sqrt(pagemtimes(norm_col, norm_row));   % S x S x nTrials x nDeployments
+                                    corr_mat = gram ./ denom_corr;                        % normalized pairwise correlation, in [-1,1]
+
+                                    med_corr = zeros(1,S,nTrials,nDeployments);
+                                    for i = 1:S
+                                        others = setdiff(1:S,i);
+                                        med_corr(1,i,:,:) = median(corr_mat(i,others,:,:), 2);
+                                    end
+
+                                    corr_delta_k = 3;   % MAD multiplier, same convention as elsewhere
+                                    med_of_meds = median(med_corr, 2);
+                                    mad_corr = mad(med_corr, 1, 2);
+
+                                    corr_flagged = med_corr < (med_of_meds - corr_delta_k .* mad_corr);
+                                    % flagged = flagged | corr_flagged;
+
+                                    %% --- Individual (per-sensor) t0 and alpha estimation ---
+                                    % Each sensor's isolated signal hat_u_i(t) is treated as its
+                                    % OWN single-sensor estimation problem: t0_i_hat, alpha_i_hat
+                                    % are computed using ONLY that sensor's own recovered data,
+                                    % its own known m_i, and its own known noise model (Ki_full_eig)
+                                    % -- no shared array quantity (no hat_alpha, no hat_t0) enters
+                                    % anywhere. This is the "Capability A" defense: an attacker
+                                    % that only falsifies transmitted content (not its own
+                                    % calibration record) produces an alpha_i_hat that deviates
+                                    % from the honest cluster; comparing {alpha_i_hat} across
+                                    % sensors requires no external reference.
+                                    %
+                                    % t0_i_hat REUSES t0_col_idx_per_sensor (already computed
+                                    % above via unweighted correlation search) -- the ML argmax
+                                    % location over tau is unaffected by GLS whitening, since
+                                    % m_i^2 > 0 scales the design vector uniformly across all
+                                    % candidate tau and does not shift the argmax.
+                                    alpha_i_hat = zeros(1, S, nTrials, nDeployments);
+                                    t0_i_hat    = zeros(1, S, nTrials, nDeployments);
+                                    G_scalar_all = zeros(1, S, nTrials, nDeployments);
+
+                                    for i = 1:S
+                                        u_i = reshape(hat_u_all(:,i,:,:), K, nTrials, nDeployments);
+                                        u_i_v = pagemtimes(U_D.', u_i);   % K x nTrials x nDeployments, in D_template's eigenbasis
+
+                                        for d_idx = 1:nDeployments
+                                            eig_i_d = Ki_full_eig{i}(:,d_idx);   % K x 1
+                                            mi_val = mi_5d(1,i,1,1,d_idx);
+
+                                            for tr = 1:nTrials
+                                                col_idx = t0_col_idx_per_sensor(i,tr,d_idx);
+                                                t0_i_hat(1,i,tr,d_idx) = t(col_idx);
+
+                                                rho_ref = D_template(:, col_idx);
+                                                rho_ref_v = U_D.' * rho_ref;   % K x 1, same eigenbasis
+
+                                                % GLS fit of u_i ~ (alpha_i * m_i^2) * rho_ref + noise,
+                                                % whitened by this sensor's OWN known noise model.
+                                                G_scalar = sum(rho_ref_v.^2 ./ eig_i_d);
+                                                c_scalar = sum(rho_ref_v .* u_i_v(:,tr,d_idx) ./ eig_i_d);
+
+                                                alpha_i_hat(1,i,tr,d_idx) = c_scalar / (G_scalar * mi_val^2);
+                                                G_scalar_all(1,i,tr,d_idx) = G_scalar * mi_val^4;   % precision of alpha_i_hat itself (chain rule through the mi^2 scaling)
+                                            end
+                                        end
+                                    end
+
+                                    %% --- Undefended array-level presence check (Q statistic) ---
+                                    % Cheap, no per-sensor flagging, no |B|<S/2 assumption needed --
+                                    % just asks "does this array's spread of independent alpha_i_hat
+                                    % look larger than pure noise should produce." bar_alpha cancels
+                                    % out (weighted variance around the array's OWN pooled mean), so
+                                    % this has a clean, exact, absolute chi^2_{S-1} threshold -- the
+                                    % legitimate version of the Lambda(empty-set) gate idea from
+                                    % earlier, which failed only because it lacked this self-
+                                    % consistency property.
+                                    G_pooled_num = sum(G_scalar_all .* alpha_i_hat, 2);
+                                    G_pooled_den = sum(G_scalar_all, 2);
+                                    alpha_pooled = G_pooled_num ./ G_pooled_den;   % 1 x 1 x nTrials x nDeployments
+
+                                    Q_stat = sum(G_scalar_all .* (alpha_i_hat - alpha_pooled).^2, 2);   % 1 x 1 x nTrials x nDeployments
+                                    delta_fa_Q = 1e-3;
+                                    Q_threshold = chi2inv(1-delta_fa_Q, S-1);
+
+                                    array_suspected = Q_stat > Q_threshold;   % 1 x 1 x nTrials x nDeployments logical
+
+                                    %% --- Sensor-vs-sensor amplitude consistency (Capability A defense) ---
+                                    % Honest sensors' independent alpha_i_hat estimates should all
+                                    % cluster near the SAME true bar_alpha -- an attacker that only
+                                    % falsifies transmitted content (m_i on file stays correct) will
+                                    % show alpha_i_hat displaced by exactly its amplitude lie factor.
+                                    % Relative (median/MAD) test, same reasoning as every other
+                                    % robust check in this pipeline: needs |B| < S/2, no external
+                                    % reference or shared array quantity required.
+                                    alpha_delta_k = 10;   % MAD multiplier, same convention as elsewhere
+                                    med_alpha = median(alpha_i_hat, 2);   % 1 x 1 x nTrials x nDeployments
+                                    mad_alpha = mad(alpha_i_hat, 1, 2);   % median absolute deviation across sensors
+
+                                    amplitude_flagged = abs(alpha_i_hat - med_alpha) > (alpha_delta_k .* mad_alpha);
+                                    % flagged = flagged | amplitude_flagged;
+
                                     honest_idx = setdiff(1:S, attacker_idx);
 
                                     %% --- DIAGNOSTIC: isolate Nw-term and N0-term scaling in K_i ---
@@ -943,6 +1057,11 @@ for experiment_idx = 1:numel(experiment_list)
                                     % set (usually just a couple of distinct groups given how
                                     % separated T_i is), and null/re-estimate once per group --
                                     % avoids one function call per individual trial.
+                                    if attacker_enabled
+                                        alpha_estimates_undefended = alpha_estimates;
+                                        t0_estimates_undefended    = t0_estimates_for_plot;
+                                    end
+
                                     alpha_final = alpha_estimates;
                                     t0_final = t0_estimates_for_plot;
 
@@ -967,8 +1086,13 @@ for experiment_idx = 1:numel(experiment_list)
 
                                                 % Order THIS trial's candidates by ITS OWN T_i --
                                                 % fully per-trial, no averaging across trials.
+                                                amp_deviation = abs(alpha_i_hat(1,F,tr,d_idx) - med_alpha(1,1,tr,d_idx)) ./ mad_alpha(1,1,tr,d_idx);
+                                                corr_deviation = (med_of_meds(1,1,tr,d_idx) - med_corr(1,F,tr,d_idx)) ./ mad_corr(1,1,tr,d_idx);
                                                 Ti_this = T_i_all(1,F,tr,d_idx) / T_threshold ...
                                                         + T_align_all(1,F,tr,d_idx) / T_align_threshold ...
+                                                        + amp_deviation ...
+                                                        + max(corr_deviation, 0) ...
+                                                        + 50 * array_suspected(1,1,tr,d_idx) ...   % Q: corroborating group-level signal, not a standalone detector
                                                         + 1e6 * sign_flagged(1,F,tr,d_idx);
                                                 [~, order] = sort(Ti_this(:), 'descend');
                                                 F_sorted = F(order.');
@@ -1066,10 +1190,12 @@ for experiment_idx = 1:numel(experiment_list)
                                         fp_Ti     = mean(T_i_all(1,honest_idx_diag,:,:) > T_threshold, 'all');
                                         fp_sign   = mean(sign_flagged(1,honest_idx_diag,:,:), 'all');
                                         fp_align  = mean(align_flagged(1,honest_idx_diag,:,:), 'all');
+                                        fp_amplitude = mean(amplitude_flagged(1,honest_idx_diag,:,:), 'all');
+                                        fp_corr = mean(corr_flagged(1,honest_idx_diag,:,:), 'all');
                                         fp_combined = mean(flagged(1,honest_idx_diag,:,:), 'all');
 
-                                        log_msg(verbosity_level, 4, 'FP rate -- T_i: %.4f | sign: %.4f | align: %.4f | combined: %.4f', ...
-                                            fp_Ti, fp_sign, fp_align, fp_combined);
+                                        log_msg(verbosity_level, 4, 'FP rate -- T_i: %.4f | sign: %.4f | align: %.4f | amplitude: %0.4f | corr: %.4f | combined: %.4f', ...
+                                            fp_Ti, fp_sign, fp_align, fp_amplitude, fp_corr, fp_combined);
                                     end
 
                                     alpha_estimates = alpha_final;
@@ -1083,6 +1209,12 @@ for experiment_idx = 1:numel(experiment_list)
                                 % Compute empirical mse.
                                 rho_empirical_mse(strat_idx,agent_db_idx,channel_db_idx,1,scheme_idx,pivot_idx,save_dim,:) = mean((alpha_estimates - alpha_true).^2,3);
                                 rho_empirical_mse(strat_idx,agent_db_idx,channel_db_idx,2,scheme_idx,pivot_idx,save_dim,:) = mean((t0_estimates_for_plot - t0_true).^2,3);
+
+                                % Compute UNDEFENDED empirical mse -- only under attack, per request.
+                                if attacker_enabled
+                                    rho_empirical_mse_undefended(strat_idx,agent_db_idx,channel_db_idx,1,scheme_idx,pivot_idx,save_dim,:) = mean((alpha_estimates_undefended - alpha_true).^2,3);
+                                    rho_empirical_mse_undefended(strat_idx,agent_db_idx,channel_db_idx,2,scheme_idx,pivot_idx,save_dim,:) = mean((t0_estimates_undefended - t0_true).^2,3);
+                                end
 
                                 % Compute empirical bias.
                                 rho_empirical_bias(strat_idx,agent_db_idx,channel_db_idx,1,scheme_idx,pivot_idx,save_dim,:) = mean(alpha_estimates,3);
@@ -1125,11 +1257,13 @@ for experiment_idx = 1:numel(experiment_list)
         avg_dep_mse = rho_empirical_mse;
         avg_dep_crlb = rho_crlb;
         avg_dep_bias = rho_empirical_bias;
+        avg_dep_mse_undefended = rho_empirical_mse_undefended;
     else
         avg_dep_var = mean(rho_empirical_var,length(size(rho_empirical_var)));
         avg_dep_mse = mean(rho_empirical_mse,length(size(rho_empirical_mse)));
         avg_dep_crlb = mean(rho_crlb,length(size(rho_crlb)));
         avg_dep_bias = mean(rho_empirical_bias,length(size(rho_empirical_bias)));
+        avg_dep_mse_undefended = mean(rho_empirical_mse_undefended,length(size(rho_empirical_mse_undefended)));
     end
 
     params_latex = ["\hat{\alpha}","\hat{t}_0"];
@@ -1156,12 +1290,18 @@ for experiment_idx = 1:numel(experiment_list)
             avg_dep_crlb(selected_strat_idxs,agent_db_idx,:,param_idx,:,:) = avg_dep_crlb(selected_strat_idxs,agent_db_idx,:,param_idx,:,:) ./ norm_coeff;
             avg_dep_var(selected_strat_idxs,agent_db_idx,:,param_idx,:,:) = avg_dep_var(selected_strat_idxs,agent_db_idx,:,param_idx,:,:) ./ norm_coeff;
             avg_dep_mse(selected_strat_idxs,agent_db_idx,:,param_idx,:,:) = avg_dep_mse(selected_strat_idxs,agent_db_idx,:,param_idx,:,:) ./ norm_coeff;
+            if attacker_enabled
+                avg_dep_mse_undefended(selected_strat_idxs,agent_db_idx,:,param_idx,:,:) = avg_dep_mse_undefended(selected_strat_idxs,agent_db_idx,:,param_idx,:,:) ./ norm_coeff;
+            end
 
             % Collect all plot values for y-axis scaling.
             all_vals = [avg_dep_crlb(selected_strat_idxs,agent_db_idx,:,param_idx,:,1:sensor_dimension);
                         avg_dep_var(selected_strat_idxs,agent_db_idx,:,param_idx,:,1:sensor_dimension);
                         avg_dep_mse(selected_strat_idxs,agent_db_idx,:,param_idx,:,1:sensor_dimension)
                         ];
+            if attacker_enabled
+                all_vals = [all_vals; avg_dep_mse_undefended(selected_strat_idxs,agent_db_idx,:,param_idx,:,1:sensor_dimension)];
+            end
 
             for scheme_idx = 1:length(selected_schemes)
                 scheme = selected_schemes(scheme_idx);
@@ -1194,6 +1334,13 @@ for experiment_idx = 1:numel(experiment_list)
                         plot(axLgd, nan,nan,'x','color','black');
                         plot(axLgd, nan,nan,'^','color','black');
                         plot(axLgd, nan,nan,'o','color','black');
+                        legend_entries = ["MSE", "VAR", "CRLB"];
+                        if attacker_enabled
+                            plot(axLgd, nan,nan,'s','color','black');
+                            legend_entries = [legend_entries, "MSE (undefended)"];
+                        end
+
+                        lgdObj = legend(axLgd, [lgd, legend_entries]);
 
                         lgdObj = legend(axLgd, [lgd, "MSE", "VAR", "CRLB"]);
                         lgdObj.Location = 'none';
@@ -1228,12 +1375,15 @@ for experiment_idx = 1:numel(experiment_list)
                             plot(ax, x_axis_series,(squeeze(avg_dep_mse(strat_idx,agent_db_idx,:,param_idx,scheme_idx,count_idx,1))),'-x','color',colorMap(iter_key),'LineWidth', plot_line_width)
                             plot(ax, x_axis_series,(squeeze(avg_dep_var(strat_idx,agent_db_idx,:,param_idx,scheme_idx,count_idx,1))),'-^','color',colorMap(iter_key),'LineWidth', plot_line_width)
                             plot(ax, x_axis_series,(squeeze(avg_dep_crlb(strat_idx,agent_db_idx,:,param_idx,scheme_idx,count_idx,1))),'--o','color',colorMap(iter_key),'LineWidth', plot_line_width)
+                            if attacker_enabled
+                                plot(ax, x_axis_series,(squeeze(avg_dep_mse_undefended(strat_idx,agent_db_idx,:,param_idx,scheme_idx,count_idx,1))),':s','color',colorMap(iter_key),'LineWidth', plot_line_width)
+                            end
                         end
                     end
 
                     xlabel('Channel SNR (dB)')
                     ylabel(" ")
-
+                    
                     title('$$'+params_latex(param_idx)+'$$','Interpreter','latex')
 
                     ax.FontSize = 15;          % font size
