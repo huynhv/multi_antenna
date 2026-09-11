@@ -10,12 +10,12 @@ addpath('.\functions')
 verbosity_level = 5;   % 1 = major sections only, 2 = + sub-steps/channel-SNR, 3 = + diagnostics
 
 % Set seed for reproducibility
-seed = 22;
+seed = 2048;
 rng(seed);
 
 nDeployments = 10;
 % Set the number of measurements per sensor, starting from 0
-K = 251;
+K = 301;
 % Set number of trials.
 nTrials = 500;
 
@@ -34,6 +34,8 @@ Tp = 1;
 dt = T0/(K-1);
 t = dt*(0:K-1)';
 
+offset_idx = ceil(Tp/dt);
+
 % Define frequency domain parameters
 fs = 1/dt;
 L = K-1;
@@ -47,7 +49,7 @@ Ps = integral(func,0,T0)/T0;
 
 % Define true parameter values.
 alpha_true = 2;
-t0_true = 1;
+t0_true = 1.5;
 
 % Set the number of antennas
 num_antennas = 10;
@@ -145,7 +147,7 @@ attacker_seed = 42;
 
 use_greedy_validation = false;   % true: Lambda-validated greedy; false: face-value nulling
 peak_same_location = true;
-attack_type = "noise";   % "noise" | "dc" | "square" | "sawtooth" | "sinusoid" | "peak" | "flip" | "replay" | "amplitude"
+attack_type = "sawtooth";   % "noise" | "dc" | "square" | "sawtooth" | "sinusoid" | "peak" | "flip" | "replay" | "amplitude"
 attacker_beta = 10;
 rng(attacker_seed);
 
@@ -361,10 +363,14 @@ for experiment_idx = 1:numel(experiment_list)
     
     % Initialize empty performance metric matrices
     rho_crlb = zeros(num_strats,length(agent_db_values),size(channel_db_values,2),2,length(selected_schemes),length(rho_vals),sensor_dimension,nDeployments);
+    rho_crlb_oracle = rho_crlb;   % Theoretical CRLB with the attacker's channel treated as absent -- upper bound, only under attack
+    
+    rho_empirical_bias = rho_crlb;
     rho_empirical_var = rho_crlb;
     rho_empirical_mse = rho_crlb;
-    rho_empirical_bias = rho_crlb;
+    rho_empirical_mse_baseline = rho_crlb;   % Full S-sensor array, attacker never hijacked anyone -- "what if there had been no attack at all"
     rho_empirical_mse_undefended = rho_crlb;   % MSE with NO defense applied -- only meaningful/populated under attack
+    rho_empirical_mse_oracle = rho_crlb;   % MSE with attacker PERFECTLY, freely removed -- upper bound, only under attack
 
     % Start run timer
     log_msg(verbosity_level, 1, 'Starting runtime...');
@@ -407,6 +413,14 @@ for experiment_idx = 1:numel(experiment_list)
                     noisy_unified_xi = alpha_true .* (mi_5d .* sensor_signal(t-t0_true, Tp, norm_fact)) + scaled_w(:,1:S,:,:,:);
                     % Compute ui here so we don't have to recompute FFT for each strat
                     [~, ui] = mf_integral_fft(noisy_unified_xi, mi_5d .* sensor_signal(t, Tp, norm_fact), 1, 1, K, dt, Tp);
+
+                    % Capture the PRISTINE, never-attacked ui -- used below to build the
+                    % "baseline" (full S-sensor array, attacker never hijacked anyone)
+                    % comparison. NOT related to the "single-antenna baseline" terminology
+                    % used elsewhere in this script -- kept as ui_no_attack to avoid confusion.
+                    if attacker_enabled
+                        ui_no_attack = ui;
+                    end
 
                     %% --- Byzantine attacker: overwrite compromised sensor(s)' transmitted
                     % signal with unstructured noise, in place of their honest ui(t). ---
@@ -462,6 +476,9 @@ for experiment_idx = 1:numel(experiment_list)
                         
                     out_cws = sum(g_tilde .* ui, 2);
                     % out_cws_noise = sum(g_tilde .* ui_noise, 2);
+                    if attacker_enabled
+                        out_cws_no_attack = sum(g_tilde .* ui_no_attack, 2);
+                    end
 
                     %% Compute values for multi-antenna
                     m = reshape(mi_5d, S, nDeployments);           % S x nDeployments
@@ -505,6 +522,53 @@ for experiment_idx = 1:numel(experiment_list)
                     lambda_B_base = zeros(Mtot, nDeployments);        % 2M x nDeployments
                     for d_idx = 1:nDeployments
                         lambda_B_base(:,d_idx) = diag(Lam_B(:,:,d_idx));
+                    end
+
+                    % --- Oracle CRLB: rebuild the SAME channel-independent pipeline above,
+                    % using ONLY the honest S-1 sensors -- as if the attacker's slot never
+                    % existed. No nulling geometry involved; this is the ordinary CRLB
+                    % construction, just restricted to a smaller sensor set from the start.
+                    if attacker_enabled
+                        honest_only = setdiff(1:S, attacker_idx);
+                        S_honest = numel(honest_only);
+
+                        m_oracle = m(honest_only,:);                    % S_honest x nDeployments
+                        g_oracle = g(honest_only,:,:);                  % S_honest x num_antennas x nDeployments
+
+                        G_R_oracle = cat(2, real(g_oracle), imag(g_oracle));
+                        G_R_oracle = permute(G_R_oracle, [2,1,3]);      % Mtot x S_honest x nDeployments
+
+                        combined_noise_psd_oracle = reshape(m_oracle.^2 .* gamma_w, S_honest, 1, nDeployments);
+                        Dmat_oracle = eye(S_honest) .* combined_noise_psd_oracle;   % S_honest x S_honest x nDeployments
+
+                        A_oracle = pagemtimes(pagemtimes(pagetranspose(g_oracle), Dmat_oracle), conj(g_oracle));
+                        A_oracle = (A_oracle + pagectranspose(A_oracle)) / 2;
+
+                        Atilde_oracle = pagemtimes(pagemtimes(pagetranspose(g_oracle), Dmat_oracle), g_oracle);
+                        Atilde_oracle = (Atilde_oracle + pagetranspose(Atilde_oracle)) / 2;
+
+                        B11_o =  0.5 * real(A_oracle + Atilde_oracle);
+                        B12_o = -0.5 * imag(A_oracle - Atilde_oracle);
+                        B21_o =  0.5 * imag(A_oracle + Atilde_oracle);
+                        B22_o =  0.5 * real(A_oracle - Atilde_oracle);
+
+                        B_oracle = cat(1, cat(2, B11_o, B12_o), cat(2, B21_o, B22_o));   % 2M x 2M x nDeployments
+                        B_oracle = (B_oracle + pagetranspose(B_oracle)) / 2;
+
+                        [U_B_oracle, Lam_B_oracle] = pageeig(B_oracle);
+                        for d_idx = 1:nDeployments
+                            [lam_sorted_o, idx_o] = sort(diag(Lam_B_oracle(:,:,d_idx)), 'descend');
+                            U_B_oracle(:,:,d_idx)   = U_B_oracle(:,idx_o,d_idx);
+                            Lam_B_oracle(:,:,d_idx) = diag(lam_sorted_o);
+                        end
+
+                        UB_transpose_oracle  = pagetranspose(U_B_oracle);         % 2M x 2M x nDeployments
+                        lambda_B_base_oracle = zeros(Mtot, nDeployments);
+                        for d_idx = 1:nDeployments
+                            lambda_B_base_oracle(:,d_idx) = diag(Lam_B_oracle(:,:,d_idx));
+                        end
+
+                        mu_oracle = m_oracle.^2;
                     end
 
                     %% --- Precompute null-space isolation projectors (channel-independent;
@@ -602,6 +666,9 @@ for experiment_idx = 1:numel(experiment_list)
                                 bi = 0;
 
                                 y = pagetranspose(out_cws + scaled_n);
+                                if attacker_enabled
+                                    y_no_attack = pagetranspose(out_cws_no_attack + scaled_n);   % SAME noise draw, only the attacked sensor's content differs
+                                end
 
                                 %%% Baseline single-antenna case from previous manuscripts
                                 if use_W == false
@@ -643,6 +710,12 @@ for experiment_idx = 1:numel(experiment_list)
                                     % ---- channel-DEPENDENT: rescale W and lambda (per channel SNR) ----
                                     lambda_vals = (2/gamma_n)      * lambda_B_base;   % 2M x nDeployments
                                     W           = (1/sqrt(0.5*gamma_n)) * UB_transpose;  % 2M x 2M x nDeployments
+
+                                    if attacker_enabled
+                                        lambda_vals_oracle = (2/gamma_n) * lambda_B_base_oracle;
+                                        W_oracle           = (1/sqrt(0.5*gamma_n)) * UB_transpose_oracle;
+                                        WG_Rmu_oracle      = reshape(pagemtimes(W_oracle, pagemtimes(G_R_oracle, reshape(mu_oracle, S_honest, 1, nDeployments))), Mtot, nDeployments);
+                                    end
 
                                     y_sq = reshape(y, K, num_antennas, nTrials, nDeployments);   % K x num_antennas x nTrials x nDeployments
                                     g_sq = reshape(g_tilde, S, num_antennas, nDeployments);   % S x num_antennas x nDeployments
@@ -1004,8 +1077,9 @@ for experiment_idx = 1:numel(experiment_list)
                                     end
 
                                     % Get time domain matrix for Qn.
-                                    [max_y_vals,I] = max(mf_with_z_sum, [], 3);
+                                    [max_y_vals,I] = max(mf_with_z_sum(:,:,offset_idx:end,:,:), [], 3);
 
+                                    I = I + offset_idx-1;
                                     t0_estimates_for_plot = reshape((I-1)*dt, 1, 1, nTrials, nDeployments);
                                     t0_estimates_for_alpha = t0_true*ones(1,1,nTrials,nDeployments);
 
@@ -1036,6 +1110,22 @@ for experiment_idx = 1:numel(experiment_list)
                                     end
                                     alpha_estimates = num ./ denom;
 
+                                    % --- Baseline: full S-sensor array, as if the attacker never
+                                    % hijacked anyone. Reuses build_null_geometry/estimate_with_
+                                    % geometry with an EMPTY exclusion set -- A=[] means every
+                                    % sensor is retained, so this reduces to the same eigen-
+                                    % decomposition the ordinary (undefended) pipeline already
+                                    % runs, just fed the pristine y_no_attack instead of y.
+                                    alpha_estimates_baseline = zeros(size(alpha_estimates));
+                                    t0_estimates_baseline    = zeros(size(t0_estimates_for_plot));
+                                    for d_idx = 1:nDeployments
+                                        geom_baseline = build_null_geometry([], mi_5d, g_tilde, gamma_w, gamma_n, Hm_arr, omega, dt, K, S, d_idx);
+                                        [alpha_b, t0_b, ~] = estimate_with_geometry(geom_baseline, y_no_attack, K, N, Tp, ...
+                                            norm_fact, t, t0_true, mfTemplateFFT_raw, D_template, 1:nTrials, d_idx, dt);
+                                        alpha_estimates_baseline(1,1,:,d_idx) = alpha_b;
+                                        t0_estimates_baseline(1,1,:,d_idx) = t0_b;
+                                    end
+
                                     % Lambda(empty-set): captured coherent energy of the
                                     % UNDEFENDED, full-array estimate -- free, already have
                                     % both ingredients. This is the baseline every candidate
@@ -1060,6 +1150,21 @@ for experiment_idx = 1:numel(experiment_list)
                                     if attacker_enabled
                                         alpha_estimates_undefended = alpha_estimates;
                                         t0_estimates_undefended    = t0_estimates_for_plot;
+
+                                        % --- Oracle ceiling: null the TRUE attacker_idx directly,
+                                        % no detection, no validation -- upper bound on what
+                                        % identification+nulling could ever achieve. Reuses the
+                                        % exact same geometry/estimation machinery as the real
+                                        % defense, just fed the ground-truth exclusion set.
+                                        alpha_estimates_oracle = zeros(size(alpha_estimates));
+                                        t0_estimates_oracle    = zeros(size(t0_estimates_for_plot));
+                                        for d_idx = 1:nDeployments
+                                            geom_oracle = build_null_geometry(attacker_idx, mi_5d, g_tilde, gamma_w, gamma_n, Hm_arr, omega, dt, K, S, d_idx);
+                                            [alpha_o, t0_o, ~] = estimate_with_geometry(geom_oracle, y, K, N, Tp, ...
+                                                norm_fact, t, t0_true, mfTemplateFFT_raw, D_template, 1:nTrials, d_idx, dt);
+                                            alpha_estimates_oracle(1,1,:,d_idx) = alpha_o;
+                                            t0_estimates_oracle(1,1,:,d_idx) = t0_o;
+                                        end
                                     end
 
                                     alpha_final = alpha_estimates;
@@ -1212,8 +1317,14 @@ for experiment_idx = 1:numel(experiment_list)
 
                                 % Compute UNDEFENDED empirical mse -- only under attack, per request.
                                 if attacker_enabled
+                                    rho_empirical_mse_baseline(strat_idx,agent_db_idx,channel_db_idx,1,scheme_idx,pivot_idx,save_dim,:) = mean((alpha_estimates_baseline - alpha_true).^2,3);
+                                    rho_empirical_mse_baseline(strat_idx,agent_db_idx,channel_db_idx,2,scheme_idx,pivot_idx,save_dim,:) = mean((t0_estimates_baseline - t0_true).^2,3);
+
                                     rho_empirical_mse_undefended(strat_idx,agent_db_idx,channel_db_idx,1,scheme_idx,pivot_idx,save_dim,:) = mean((alpha_estimates_undefended - alpha_true).^2,3);
                                     rho_empirical_mse_undefended(strat_idx,agent_db_idx,channel_db_idx,2,scheme_idx,pivot_idx,save_dim,:) = mean((t0_estimates_undefended - t0_true).^2,3);
+                                
+                                    rho_empirical_mse_oracle(strat_idx,agent_db_idx,channel_db_idx,1,scheme_idx,pivot_idx,save_dim,:) = mean((alpha_estimates_oracle - alpha_true).^2,3);
+                                    rho_empirical_mse_oracle(strat_idx,agent_db_idx,channel_db_idx,2,scheme_idx,pivot_idx,save_dim,:) = mean((t0_estimates_oracle - t0_true).^2,3);
                                 end
 
                                 % Compute empirical bias.
@@ -1231,6 +1342,14 @@ for experiment_idx = 1:numel(experiment_list)
 
                                     rho_crlb(strat_idx,agent_db_idx,channel_db_idx,1,scheme_idx,pivot_idx,save_dim,:) = 2*pi ./ alpha_term;
                                     rho_crlb(strat_idx,agent_db_idx,channel_db_idx,2,scheme_idx,pivot_idx,save_dim,:) = 2*pi ./ (alpha_true^2 .* t0_term);
+
+                                    if attacker_enabled
+                                        alpha_term_oracle = integral(@(w) sum(WG_Rmu_oracle.^2 .*          mag_sqr_S0(w).^2 ./ (lambda_vals_oracle.*mag_sqr_S0(w)+1), 1), -Inf, Inf, 'ArrayValued', true);
+                                        t0_term_oracle    = integral(@(w) sum(WG_Rmu_oracle.^2 .* (w.^2) .* mag_sqr_S0(w).^2 ./ (lambda_vals_oracle.*mag_sqr_S0(w)+1), 1), -Inf, Inf, 'ArrayValued', true);
+
+                                        rho_crlb_oracle(strat_idx,agent_db_idx,channel_db_idx,1,scheme_idx,pivot_idx,save_dim,:) = 2*pi ./ alpha_term_oracle;
+                                        rho_crlb_oracle(strat_idx,agent_db_idx,channel_db_idx,2,scheme_idx,pivot_idx,save_dim,:) = 2*pi ./ (alpha_true^2 .* t0_term_oracle);
+                                    end
                                 end
                             end
                             total_est_time = toc(total_est_start);
@@ -1258,12 +1377,17 @@ for experiment_idx = 1:numel(experiment_list)
         avg_dep_crlb = rho_crlb;
         avg_dep_bias = rho_empirical_bias;
         avg_dep_mse_undefended = rho_empirical_mse_undefended;
+        avg_dep_mse_oracle = rho_empirical_mse_oracle;   % (or mean(...) branch, matching the existing if/else)
+        avg_dep_crb_oracle = rho_crlb_oracle;
     else
         avg_dep_var = mean(rho_empirical_var,length(size(rho_empirical_var)));
         avg_dep_mse = mean(rho_empirical_mse,length(size(rho_empirical_mse)));
         avg_dep_crlb = mean(rho_crlb,length(size(rho_crlb)));
         avg_dep_bias = mean(rho_empirical_bias,length(size(rho_empirical_bias)));
         avg_dep_mse_undefended = mean(rho_empirical_mse_undefended,length(size(rho_empirical_mse_undefended)));
+        avg_dep_mse_oracle = mean(rho_empirical_mse_oracle,length(size(rho_empirical_mse_oracle)));   % (or mean(...) branch, matching the existing if/else)
+        avg_dep_crlb_oracle = mean(rho_crlb_oracle,length(size(rho_crlb_oracle)));
+        avg_dep_mse_baseline = mean(rho_empirical_mse_baseline,length(size(rho_empirical_mse_baseline)));
     end
 
     params_latex = ["\hat{\alpha}","\hat{t}_0"];
@@ -1292,6 +1416,9 @@ for experiment_idx = 1:numel(experiment_list)
             avg_dep_mse(selected_strat_idxs,agent_db_idx,:,param_idx,:,:) = avg_dep_mse(selected_strat_idxs,agent_db_idx,:,param_idx,:,:) ./ norm_coeff;
             if attacker_enabled
                 avg_dep_mse_undefended(selected_strat_idxs,agent_db_idx,:,param_idx,:,:) = avg_dep_mse_undefended(selected_strat_idxs,agent_db_idx,:,param_idx,:,:) ./ norm_coeff;
+                avg_dep_mse_oracle(selected_strat_idxs,agent_db_idx,:,param_idx,:,:) = avg_dep_mse_oracle(selected_strat_idxs,agent_db_idx,:,param_idx,:,:) ./ norm_coeff;
+                avg_dep_mse_baseline(selected_strat_idxs,agent_db_idx,:,param_idx,:,:) = avg_dep_mse_baseline(selected_strat_idxs,agent_db_idx,:,param_idx,:,:) ./ norm_coeff;
+                avg_dep_crlb_oracle(selected_strat_idxs,agent_db_idx,:,param_idx,:,:) = avg_dep_crlb_oracle(selected_strat_idxs,agent_db_idx,:,param_idx,:,:) ./ norm_coeff;
             end
 
             % Collect all plot values for y-axis scaling.
@@ -1300,7 +1427,10 @@ for experiment_idx = 1:numel(experiment_list)
                         avg_dep_mse(selected_strat_idxs,agent_db_idx,:,param_idx,:,1:sensor_dimension)
                         ];
             if attacker_enabled
-                all_vals = [all_vals; avg_dep_mse_undefended(selected_strat_idxs,agent_db_idx,:,param_idx,:,1:sensor_dimension)];
+                all_vals = [all_vals; avg_dep_mse_undefended(selected_strat_idxs,agent_db_idx,:,param_idx,:,1:sensor_dimension);
+                            avg_dep_mse_oracle(selected_strat_idxs,agent_db_idx,:,param_idx,:,1:sensor_dimension);
+                            avg_dep_mse_baseline(selected_strat_idxs,agent_db_idx,:,param_idx,:,1:sensor_dimension);
+                            avg_dep_crlb_oracle(selected_strat_idxs,agent_db_idx,:,param_idx,:,1:sensor_dimension)];
             end
 
             for scheme_idx = 1:length(selected_schemes)
@@ -1337,7 +1467,8 @@ for experiment_idx = 1:numel(experiment_list)
                         legend_entries = ["MSE", "VAR", "CRLB"];
                         if attacker_enabled
                             plot(axLgd, nan,nan,'s','color','black');
-                            legend_entries = [legend_entries, "MSE (undefended)"];
+                            plot(axLgd, nan,nan,'s','color','black');
+                            legend_entries = [legend_entries, "MSE (undefended)", "MSE (oracle)"];
                         end
 
                         lgdObj = legend(axLgd, [lgd, legend_entries]);
@@ -1374,16 +1505,19 @@ for experiment_idx = 1:numel(experiment_list)
 
                             plot(ax, x_axis_series,(squeeze(avg_dep_mse(strat_idx,agent_db_idx,:,param_idx,scheme_idx,count_idx,1))),'-x','color',colorMap(iter_key),'LineWidth', plot_line_width)
                             plot(ax, x_axis_series,(squeeze(avg_dep_var(strat_idx,agent_db_idx,:,param_idx,scheme_idx,count_idx,1))),'-^','color',colorMap(iter_key),'LineWidth', plot_line_width)
-                            plot(ax, x_axis_series,(squeeze(avg_dep_crlb(strat_idx,agent_db_idx,:,param_idx,scheme_idx,count_idx,1))),'--o','color',colorMap(iter_key),'LineWidth', plot_line_width)
+                            % plot(ax, x_axis_series,(squeeze(avg_dep_crlb(strat_idx,agent_db_idx,:,param_idx,scheme_idx,count_idx,1))),'--o','color',colorMap(iter_key),'LineWidth', plot_line_width)
                             if attacker_enabled
-                                plot(ax, x_axis_series,(squeeze(avg_dep_mse_undefended(strat_idx,agent_db_idx,:,param_idx,scheme_idx,count_idx,1))),':s','color',colorMap(iter_key),'LineWidth', plot_line_width)
+                                plot(ax, x_axis_series,(squeeze(avg_dep_mse_undefended(strat_idx,agent_db_idx,:,param_idx,scheme_idx,count_idx,1))),':s','color','red','LineWidth', plot_line_width)
+                                plot(ax, x_axis_series,(squeeze(avg_dep_mse_oracle(strat_idx,agent_db_idx,:,param_idx,scheme_idx,count_idx,1))),':s','color','green','LineWidth', plot_line_width)
+                                plot(ax, x_axis_series,(squeeze(avg_dep_mse_baseline(strat_idx,agent_db_idx,:,param_idx,scheme_idx,count_idx,1))),':s','color','blue','LineWidth', plot_line_width)
+                                % plot(ax, x_axis_series,(squeeze(avg_dep_crlb_oracle(strat_idx,agent_db_idx,:,param_idx,scheme_idx,count_idx,1))),':s','color','magenta','LineWidth', plot_line_width)
                             end
                         end
                     end
 
                     xlabel('Channel SNR (dB)')
                     ylabel(" ")
-                    
+
                     title('$$'+params_latex(param_idx)+'$$','Interpreter','latex')
 
                     ax.FontSize = 15;          % font size
@@ -1483,6 +1617,7 @@ geom.Q_A = Q_A;
 geom.r_dim = r_dim;
 geom.W_A = W_A;
 geom.WGmu_A = WGmu_A;
+geom.lambda_vals_A = lambda_vals_A;
 geom.Qn_cache = Qn_cache;
 geom.num_antennas = num_antennas;
 end
