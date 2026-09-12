@@ -1,7 +1,3 @@
-% 9/3/2026 LEFT OFF HERE: atp it seems like jamming and flipping are
-% solved, the more open-ended attacks are the arbitrary time shift and
-% amplitude scaling
-
 % Clear all variables and close all existing figures.
 clearvars
 close all
@@ -72,11 +68,6 @@ max_ti = 1;
 min_ti = 0.5; 
 
 %% Generate mi and ti
-% Distance-first: ti (= di, v=1) sampled directly since max_ti is the true
-% structural constraint (bounded by the fixed observation window). mi is
-% DERIVED from di via a physical path-loss + shadowing model, so it remains
-% an independent, non-circular quantity for the geometric defense to test
-% against later (g(d_i) vs. the sensor's implied amplitude).
 path_loss_exp = 1;
 shadow_sigma_dB = 1;
 
@@ -142,12 +133,12 @@ end
 % every trial; only "noise" is redrawn per trial.
 attacker_enabled = true;
 attacker_idx     = [1];      % sensor index/indices (within 1:S) that are compromised
-attacker_db      = -10;      % attacker "SNR", same convention as agent_db (see below)
+attacker_db      = -5;      % attacker "SNR", same convention as agent_db (see below)
 attacker_seed = 42;
 
 use_greedy_validation = false;   % true: Lambda-validated greedy; false: face-value nulling
 peak_same_location = true;
-attack_type = "noise";   % "noise" | "dc" | "square" | "sawtooth" | "sinusoid" | "peak" | "flip" | "replay" | "amplitude"
+attack_type = "flip";   % "noise" | "dc" | "square" | "sawtooth" | "sinusoid" | "peak" | "flip" | "replay" | "amplitude"
 attacker_beta = 10;
 rng(attacker_seed);
 
@@ -1531,14 +1522,14 @@ for experiment_idx = 1:numel(experiment_list)
 
                             plot(ax, x_axis_series,(squeeze(avg_dep_mse(strat_idx,agent_db_idx,:,param_idx,scheme_idx,count_idx,1))),'-x','color',colorMap(iter_key),'LineWidth', plot_line_width)
                             % plot(ax, x_axis_series,(squeeze(avg_dep_var(strat_idx,agent_db_idx,:,param_idx,scheme_idx,count_idx,1))),'-^','color',colorMap(iter_key),'LineWidth', plot_line_width)
-                            % plot(ax, x_axis_series,(squeeze(avg_dep_crlb(strat_idx,agent_db_idx,:,param_idx,scheme_idx,count_idx,1))),'--o','color',colorMap(iter_key),'LineWidth', plot_line_width)
+                            plot(ax, x_axis_series,(squeeze(avg_dep_crlb(strat_idx,agent_db_idx,:,param_idx,scheme_idx,count_idx,1))),'--o','color',colorMap(iter_key),'LineWidth', plot_line_width)
                             if attacker_enabled
-                                plot(ax, x_axis_series,(squeeze(avg_dep_mse_undefended(strat_idx,agent_db_idx,:,param_idx,scheme_idx,count_idx,1))),':s','color','red','LineWidth', plot_line_width)
-                                % plot(ax, x_axis_series,(squeeze(avg_dep_mse_oracle(strat_idx,agent_db_idx,:,param_idx,scheme_idx,count_idx,1))),':s','color','green','LineWidth', plot_line_width)
-                                plot(ax, x_axis_series,(squeeze(avg_dep_mse_baseline(strat_idx,agent_db_idx,:,param_idx,scheme_idx,count_idx,1))),':s','color','blue','LineWidth', plot_line_width)
-                                plot(ax, x_axis_series,(squeeze(avg_dep_mse_trimmed(strat_idx,agent_db_idx,:,param_idx,scheme_idx,count_idx,1))),':s','color','cyan','LineWidth', plot_line_width)
-                                plot(ax, x_axis_series,(squeeze(avg_dep_mse_bs(strat_idx,agent_db_idx,:,param_idx,scheme_idx,count_idx,1))),':s','color','magenta','LineWidth', plot_line_width)
-                                % plot(ax, x_axis_series,(squeeze(avg_dep_crlb_oracle(strat_idx,agent_db_idx,:,param_idx,scheme_idx,count_idx,1))),':s','color','magenta','LineWidth', plot_line_width)
+                                plot(ax, x_axis_series,(squeeze(avg_dep_mse_undefended(strat_idx,agent_db_idx,:,param_idx,scheme_idx,count_idx,1))),':x','color','red','LineWidth', plot_line_width)
+                                plot(ax, x_axis_series,(squeeze(avg_dep_mse_baseline(strat_idx,agent_db_idx,:,param_idx,scheme_idx,count_idx,1))),':x','color','blue','LineWidth', plot_line_width)
+                                plot(ax, x_axis_series,(squeeze(avg_dep_mse_trimmed(strat_idx,agent_db_idx,:,param_idx,scheme_idx,count_idx,1))),':x','color','cyan','LineWidth', plot_line_width)
+                                plot(ax, x_axis_series,(squeeze(avg_dep_mse_bs(strat_idx,agent_db_idx,:,param_idx,scheme_idx,count_idx,1))),':x','color','magenta','LineWidth', plot_line_width)
+                                % plot(ax, x_axis_series,(squeeze(avg_dep_mse_oracle(strat_idx,agent_db_idx,:,param_idx,scheme_idx,count_idx,1))),':x','color','green','LineWidth', plot_line_width)
+                                % plot(ax, x_axis_series,(squeeze(avg_dep_crlb_oracle(strat_idx,agent_db_idx,:,param_idx,scheme_idx,count_idx,1))),':o','color','magenta','LineWidth', plot_line_width)
                             end
                         end
                     end
