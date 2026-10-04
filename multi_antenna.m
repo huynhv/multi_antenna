@@ -18,7 +18,7 @@ K = 301;
 nTrials = 500;
 
 % Set number of sensors
-sensor_vals = 5; % [5,10]
+sensor_vals = 9; % [5,10]
 dropout_vals = 0;
 sensor_dimension = length(sensor_vals);
 
@@ -50,7 +50,7 @@ alpha_true = 3;
 t0_true = 1.5;
 
 % Set the number of antennas
-num_antennas = 12;
+num_antennas = 9;
 Mtot = 2*num_antennas;
 
 %%% Always generate w, n, and channel gain for maximum S, then use subsets for different S trials
@@ -66,12 +66,11 @@ all_gi = (randn(1,S_max,num_antennas,1,nDeployments) + 1i*randn(1,S_max,num_ante
 % max_mi = 1;
 % min_mi = 0.5;
 
-max_ti = 1;
-min_ti = 0.5; 
-
 %% Generate mi and ti
-path_loss_exp = 1;
-shadow_sigma_dB = 1;
+max_ti = 1;
+min_ti = 0.8; 
+path_loss_exp = 0.5;
+shadow_sigma_dB = 0.2;
 
 m_ref = 1;              % reference amplitude at distance min_ti
 c_gain = m_ref * min_ti^path_loss_exp;   % anchors: unshadowed mi = m_ref at d = min_ti
@@ -88,7 +87,7 @@ selected_schemes = "EPC";
 % Define Rayleigh distribution parameters.
 rayleigh_factor = 1/sqrt(2);
 E_mag_g_sqr = 2*rayleigh_factor^2;
-E_mi_sqr = mean(all_mi(:).^2);
+E_mi_sqr = mean(all_mi(:).^2); % --> could generate empirical value here
 
 % Set miscellaneous parameters
 norm_fact = 1;
@@ -105,7 +104,7 @@ end
 
 %% Byzantine attacker configuration
 attacker_enabled = true;
-attacker_idx     = [1];      % sensor index/indices (within 1:S) that are compromised
+attacker_idx     = [4,5,6]; % [2,4]      % sensor index/indices (within 1:S) that are compromised
 attacker_db      = 0;      % attacker "SNR", same convention as agent_db (see below)
 attacker_seed = 42;
 
@@ -135,6 +134,9 @@ lam_Rss = diag(Lam_Rss);   % (K-d_sub) x 1
 
 % Eigenvalues of D_template itself (already computed via U_D/Sigma_D above)
 lam_D = diag(Sigma_D);   % K x 1
+% Project D_template's columns into U_D's eigenbasis once -- reused every
+% (sensor, deployment) below since it doesn't depend on either.
+D_template_v = U_D.' * D_template;   % K x K
 
 log_msg(verbosity_level, 1, 'Subspace-projection residual test: d = %d, K-d = %d', d_sub, K-d_sub);
 
@@ -174,11 +176,11 @@ for experiment_idx = 1:numel(experiment_list)
 
     % Configure strategies
     agent_db_values = 5;
-    channel_snr = linspace(0,15,5);
+    channel_snr = linspace(0,20,5);
     rho_vals = 0.5;
 
-    % attack_type = "flip";   % "noise" | "dc" | "square" | "sawtooth" | "sinusoid" | "peak" | "flip" | "time shift" | "amplitude scale"
-    attacks = ["amplitude scale"];
+    % attack_type = "flip";   % "noise" | "sawtooth" | "sinusoid" | "peak" | "flip" | "time shift" | "amplitude scale"
+    attacks = ["time shift"];
 
     if numel(attacks) == 0
         error("No attack type has been specified!")
@@ -243,7 +245,7 @@ for experiment_idx = 1:numel(experiment_list)
                 all_attacker_noise = randn(K,S_max,1,nTrials,nDeployments);
 
             case "dc"
-                dc_sign = sign(randn(1,S_max));                    % 1 x S_max, one sign per slot
+                dc_sign = ones(1,S_max); % sign(randn(1,S_max));                    % 1 x S_max, one sign per slot
                 waveform = repmat(dc_sign, K, 1);                  % K x S_max
                 all_attacker_noise = repmat(reshape(waveform,K,S_max,1,1,1), 1,1,1,nTrials,nDeployments);
 
@@ -285,22 +287,22 @@ for experiment_idx = 1:numel(experiment_list)
                 all_attacker_noise = repmat(reshape(waveform,K,S_max,1,1,1), 1,1,1,nTrials,nDeployments);
 
             case "time shift" %%% TODO: this can just be implemented as a circular shift
-                t0_grid_full = repmat(reshape(t,1,1,[]), 1,1,1,nDeployments);
-                [~, R00_full] = mf_integral_fft(sensor_signal(t-t0_grid_full,Tp,norm_fact), sensor_signal(t,Tp,norm_fact), 1, 1, K, dt, Tp);
-                rho_dictionary = reshape(R00_full(:,:,:,1), K, K);   % rho(t - t_j), same construction as D_template
-
-                feasible_grid = t;
-                tau_per_slot = feasible_grid(randi(numel(feasible_grid), 1, S_max));
-                tau_per_slot = 0.1 * ones(1, S_max); 
-
-                waveform = zeros(K, S_max);
-                for a = 1:S_max
-                    [~, col_idx] = min(abs(t - tau_per_slot(a)));
-                    waveform(:,a) = rho_dictionary(:, col_idx);
-                end
-                % all_attacker_noise = repmat(reshape(waveform,K,S_max,1,1,1), 1,1,1,nTrials,nDeployments);
-
                 all_attacker_noise = zeros(K,S_max,1,nTrials,nDeployments);   % unused placeholder
+                
+                % t0_grid_full = repmat(reshape(t,1,1,[]), 1,1,1,nDeployments);
+                % [~, R00_full] = mf_integral_fft(sensor_signal(t-t0_grid_full,Tp,norm_fact), sensor_signal(t,Tp,norm_fact), 1, 1, K, dt, Tp);
+                % rho_dictionary = reshape(R00_full(:,:,:,1), K, K);   % rho(t - t_j), same construction as D_template
+                % 
+                % feasible_grid = t;
+                % tau_per_slot = feasible_grid(randi(numel(feasible_grid), 1, S_max));
+                % tau_per_slot = 0.1 * ones(1, S_max); 
+                % 
+                % waveform = zeros(K, S_max);
+                % for a = 1:S_max
+                %     [~, col_idx] = min(abs(t - tau_per_slot(a)));
+                %     waveform(:,a) = rho_dictionary(:, col_idx);
+                % end
+                % all_attacker_noise = repmat(reshape(waveform,K,S_max,1,1,1), 1,1,1,nTrials,nDeployments);
 
             case "flip"
                 all_attacker_noise = zeros(K,S_max,1,nTrials,nDeployments);   % unused placeholder
@@ -354,9 +356,7 @@ for experiment_idx = 1:numel(experiment_list)
                     [~, ui] = mf_integral_fft(noisy_unified_xi, mi_5d .* sensor_signal(t, Tp, norm_fact), 1, 1, K, dt, Tp);
 
                     % Capture the PRISTINE, never-attacked ui
-                    if attacker_enabled
-                        ui_no_attack = ui;
-                    end
+                    ui_no_attack = ui;
 
                     %% --- Byzantine attacker: overwrite compromised sensor(s)' transmitted
                     % signal with unstructured noise, in place of their honest ui(t). ---
@@ -370,14 +370,14 @@ for experiment_idx = 1:numel(experiment_list)
                         elseif attack_type == "amplitude scale"
                             % General amplitude lie: beta * alpha * m_i^2 * rho(t-t0) +
                             % beta * w_i(t)
-                            attacker_beta = 10;
+                            attacker_beta = 0.1;
                             for a = active_attackers
                                 ui(:, a, :, :, :) = attacker_beta * ui(:, a, :, :, :);
                             end
                         elseif attack_type == "time shift"
                             % General time shift, truncate any segment of
                             % the waveform that falls outside of [0, T0]
-                            t0_attacker = 0.1;
+                            t0_attacker = 3;
                             t0_shift = t0_attacker - t0_true;
                             for a = active_attackers
                                 ui(:, a, :, :, :) = shift_waveform(ui(:, a, :, :, :), t, t0_shift);
@@ -409,10 +409,7 @@ for experiment_idx = 1:numel(experiment_list)
                     end
                         
                     out_cws = sum(g_tilde .* ui, 2);
-
-                    if attacker_enabled
-                        out_cws_no_attack = sum(g_tilde .* ui_no_attack, 2);
-                    end
+                    out_cws_no_attack = sum(g_tilde .* ui_no_attack, 2);
 
                     %% Compute values for multi-antenna
                     m = reshape(mi_5d, S, nDeployments);           % S x nDeployments
@@ -533,7 +530,7 @@ for experiment_idx = 1:numel(experiment_list)
                             channel_db_start = tic;
     
                             % Print statement for at-a-glance performance.
-                            log_msg(verbosity_level, 2, 'Scheme %s | Attack Type %s | Agent SNR = %d dB | Channel SNR = %g dB | S = %d | Dropout = %d', ...
+                            log_msg(verbosity_level, 2, 'Scheme %s | Attack Type = %s | Agent SNR = %d dB | Channel SNR = %g dB | S = %d | Dropout = %d', ...
                                 scheme, attack_type, agent_db_values(agent_db_idx), channel_db_values(scheme_idx,channel_db_idx,agent_db_idx), S, dropout_vals(dropout_idx));
 
                             if scheme == "EPC"
@@ -579,9 +576,7 @@ for experiment_idx = 1:numel(experiment_list)
                                 bi = 0;
 
                                 y = pagetranspose(out_cws + scaled_n);
-                                if attacker_enabled
-                                    y_no_attack = pagetranspose(out_cws_no_attack + scaled_n);   % SAME noise draw, only the attacked sensor's content differs
-                                end
+                                y_no_attack = pagetranspose(out_cws_no_attack + scaled_n);   % SAME noise draw, only the attacked sensor's content differs
 
                                 %%% Baseline single-antenna case from previous manuscripts
                                 if use_W == false
@@ -656,42 +651,76 @@ for experiment_idx = 1:numel(experiment_list)
                                     %% --- Subspace-projection residual test: whitened
                                     % out-of-Phi energy per sensor. T_i ~ chi^2_{K-d_sub}
                                     % under "sensor i honest" 
+                                    flagged = false(1, S, nTrials, nDeployments);
 
-                                    T_i_all = zeros(1, S, nTrials, nDeployments);
-                                    for i = 1:S
-                                        u_i = reshape(hat_u_all(:,i,:,:), K, nTrials, nDeployments);
-
-                                        proj_i = pagemtimes(Phi, pagemtimes(Phi.', u_i));
-                                        R_i_psi = pagemtimes(Psi.', u_i - proj_i);   % (K-d_sub) x nTrials x nDeployments
-
-                                        % Rotate into Rss_Psi's eigenbasis -- whitening is now an
-                                        % elementwise reweight, not a full (K-d_sub)x(K-d_sub) form.
-                                        R_i_v = pagemtimes(V_Rss.', R_i_psi);   % (K-d_sub) x nTrials x nDeployments
-                                        weights = reshape(Ki_diag_all{i}, K-d_sub, 1, nDeployments);
-
-                                        T_i_all(1,i,:,:) = reshape(sum((R_i_v.^2) .* weights, 1), 1,1,nTrials,nDeployments);
-                                    end
-
-                                    % Fixed, precomputed threshold -- same value for every
-                                    % sensor, every trial, every deployment (Statistics and
-                                    % Machine Learning Toolbox required for chi2inv).
-                                    delta_fa = 1e-6;
-                                    T_threshold = chi2inv(1-delta_fa, K-d_sub);
-                                    flagged = T_i_all > T_threshold;   % 1 x S x nTrials x nDeployments logical
+                                    % Ti_all = zeros(1, S, nTrials, nDeployments);
+                                    % for i = 1:S
+                                    %     u_i = reshape(hat_u_all(:,i,:,:), K, nTrials, nDeployments);
+                                    % 
+                                    %     proj_i = pagemtimes(Phi, pagemtimes(Phi.', u_i));
+                                    %     R_i_psi = pagemtimes(Psi.', u_i - proj_i);   % (K-d_sub) x nTrials x nDeployments
+                                    % 
+                                    %     % Rotate into Rss_Psi's eigenbasis -- whitening is now an
+                                    %     % elementwise reweight, not a full (K-d_sub)x(K-d_sub) form.
+                                    %     R_i_v = pagemtimes(V_Rss.', R_i_psi);   % (K-d_sub) x nTrials x nDeployments
+                                    %     weights = reshape(Ki_diag_all{i}, K-d_sub, 1, nDeployments);
+                                    % 
+                                    %     Ti_all(1,i,:,:) = reshape(sum((R_i_v.^2) .* weights, 1), 1,1,nTrials,nDeployments);
+                                    % end
+                                    % 
+                                    % % Fixed, precomputed threshold -- same value for every
+                                    % % sensor, every trial, every deployment (Statistics and
+                                    % % Machine Learning Toolbox required for chi2inv).
+                                    % delta_fa = 1e-6;
+                                    % T_threshold = chi2inv(1-delta_fa, K-d_sub);
+                                    % Ti_flagged = Ti_all > T_threshold;
+                                    % flagged = flagged | Ti_flagged; % 1 x S x nTrials x nDeployments logical
 
                                     %% --- Practical hat_t0 for the sign-flip check: robust
                                     % version. (1) EXCLUDES sensors already flagged by T_i
-                                    corr_per_sensor = dt * pagemtimes(D_template.', reshape(hat_u_all, K, S*nTrials*nDeployments));   % K x (S*nTrials*nDeployments)
-                                    [~, best_col_per_sensor] = max(corr_per_sensor(offset_idx:end,:), [], 1);
+                                    % corr_per_sensor = dt * pagemtimes(D_template.', reshape(hat_u_all, K, S*nTrials*nDeployments));   % K x (S*nTrials*nDeployments)
+                                    % [~, best_col_per_sensor] = max(corr_per_sensor(offset_idx:end,:), [], 1);
+                                    % 
+                                    % best_col_per_sensor = best_col_per_sensor + offset_idx - 1;
+                                    % t0_col_idx_per_sensor = reshape(best_col_per_sensor, S, nTrials, nDeployments) - 1;   % per-sensor delay guess
 
-                                    best_col_per_sensor = best_col_per_sensor + offset_idx - 1;
-                                    t0_col_idx_per_sensor = reshape(best_col_per_sensor, S, nTrials, nDeployments) - 1;   % per-sensor delay guess
+                                    t0_col_idx_per_sensor = zeros(S, nTrials, nDeployments);
+                                    c_scalar_at_best = zeros(S, nTrials, nDeployments);   % cache c_i(tau_hat) for reuse below
+                                    G_scalar_at_best = zeros(S, nTrials, nDeployments);   % cache G_i(tau_hat) for reuse below
+
+                                    for i = 1:S
+                                        u_i_v_all = pagemtimes(U_D.', reshape(hat_u_all(:,i,:,:), K, nTrials, nDeployments));  % K x nTrials x nDeployments
+
+                                        for d_idx = 1:nDeployments
+                                            eig_i_d = Ki_full_eig{i}(:,d_idx);        % K x 1
+                                            weights = 1 ./ eig_i_d;                    % K x 1
+
+                                            % G_i(tau) for every candidate tau -- trial-independent, computed once
+                                            G_i_all_tau = sum((D_template_v.^2) .* weights, 1);   % 1 x K
+
+                                            % c_i(tau) for every candidate tau, all trials at once
+                                            u_i_v_d = u_i_v_all(:,:,d_idx);                        % K x nTrials
+                                            c_i_all_tau = (weights .* u_i_v_d).' * D_template_v;   % nTrials x K
+
+                                            ratio = (c_i_all_tau.^2) ./ G_i_all_tau;                % nTrials x K, broadcast over rows
+
+                                            [~, best_col] = max(ratio(:, offset_idx:end), [], 2);   % nTrials x 1
+                                            best_col = best_col + offset_idx - 1;                   % 1-based column index into D_template
+
+                                            lin_idx = sub2ind([nTrials, K], (1:nTrials).', best_col);
+                                            c_scalar_at_best(i,:,d_idx) = c_i_all_tau(lin_idx);
+                                            G_scalar_at_best(i,:,d_idx) = G_i_all_tau(best_col);
+
+                                            t0_col_idx_per_sensor(i,:,d_idx) = best_col;
+                                        end
+                                    end
 
                                     t0_col_idx_per_trial = zeros(1, nTrials, nDeployments);
                                     for d_idx = 1:nDeployments
                                         for tr = 1:nTrials
-                                            already_flagged = find(flagged(1,:,tr,d_idx));
-                                            candidates = setdiff(1:S, already_flagged);
+                                            % already_flagged = find(flagged(1,:,tr,d_idx));
+                                            % candidates = setdiff(1:S, already_flagged);
+                                            candidates = [];
                                             if isempty(candidates)
                                                 candidates = 1:S;   % fallback: everyone flagged, use all anyway
                                             end
@@ -713,120 +742,183 @@ for experiment_idx = 1:numel(experiment_list)
                                     % attacker's is unconditionally negative -- no calibration,
                                     % no threshold tuning needed, unlike T_i.
 
-                                    hat_c_all = zeros(1, S, nTrials, nDeployments);
-                                    for i = 1:S
-                                        u_i = reshape(hat_u_all(:,i,:,:), K, nTrials, nDeployments);
-                                        for d_idx = 1:nDeployments
-                                            for tr = 1:nTrials
-                                                rho_ref = D_template(:, t0_col_idx_per_trial(1,tr,d_idx)); %%% TODO: this can just be regular autocorrelation function, index doesn't matter so long as it is within observation interval
-                                                hat_c_all(1,i,tr,d_idx) = dt * (rho_ref.' * u_i(:,tr,d_idx));
-                                            end
-                                        end
-                                    end
-
-                                    sign_flagged = hat_c_all < 0;   % 1 x S x nTrials x nDeployments logical
-                                    flagged = flagged | sign_flagged;   % combine with the existing T_i-based flag
+                                    % hat_c_all = zeros(1, S, nTrials, nDeployments);
+                                    % for i = 1:S
+                                    %     u_i = reshape(hat_u_all(:,i,:,:), K, nTrials, nDeployments);
+                                    %     for d_idx = 1:nDeployments
+                                    %         for tr = 1:nTrials
+                                    %             rho_ref = D_template(:, t0_col_idx_per_trial(1,tr,d_idx)); %%% TODO: this can just be regular autocorrelation function, index doesn't matter so long as it is within observation interval
+                                    %             hat_c_all(1,i,tr,d_idx) = dt * (rho_ref.' * u_i(:,tr,d_idx));
+                                    %         end
+                                    %     end
+                                    % end
+                                    % 
+                                    % sign_flagged = hat_c_all < 0;   % 1 x S x nTrials x nDeployments logical
+                                    % flagged = flagged | sign_flagged;   % combine with the existing T_i-based flag
 
                                     %% --- Coherent-replay defense (T_i^align) ---
                                     % Tests each sensor against the SINGLE consensus direction
                                     % rho(.-t0_hat) (reusing t0_col_idx_per_trial from the
                                     % sign-flip check above)
-                                    T_align_all = zeros(1, S, nTrials, nDeployments);
-                                    for i = 1:S
-                                        u_i = reshape(hat_u_all(:,i,:,:), K, nTrials, nDeployments);
-                                        u_i_v = pagemtimes(U_D.', u_i);   % K x nTrials x nDeployments, in D_template's eigenbasis
+                                    
+                                    % T_align_all = zeros(1, S, nTrials, nDeployments);
+                                    % for i = 1:S
+                                    %     u_i = reshape(hat_u_all(:,i,:,:), K, nTrials, nDeployments);
+                                    %     u_i_v = pagemtimes(U_D.', u_i);   % K x nTrials x nDeployments, in D_template's eigenbasis
+                                    % 
+                                    %     for d_idx = 1:nDeployments
+                                    %         eig_i_d = Ki_full_eig{i}(:,d_idx);   % K x 1
+                                    % 
+                                    %         for tr = 1:nTrials
+                                    %             rho_ref = D_template(:, t0_col_idx_per_trial(1,tr,d_idx));
+                                    %             rho_ref_v = U_D.' * rho_ref;   % K x 1, same eigenbasis
+                                    % 
+                                    %             G_scalar = sum(rho_ref_v.^2 ./ eig_i_d);
+                                    %             c_scalar = sum(rho_ref_v .* u_i_v(:,tr,d_idx) ./ eig_i_d);
+                                    %             E_total  = sum(u_i_v(:,tr,d_idx).^2 ./ eig_i_d);
+                                    % 
+                                    %             S_captured = c_scalar^2 / G_scalar;
+                                    %             T_align_all(1,i,tr,d_idx) = E_total - S_captured;
+                                    %         end
+                                    %     end
+                                    % end
+                                    % 
+                                    % delta_fa_align = 1e-6;
+                                    % T_align_threshold = chi2inv(1-delta_fa_align, K-1);   % K-1 DOF: one direction removed
+                                    % align_flagged = T_align_all > T_align_threshold;
+                                    % flagged = flagged | align_flagged;
 
-                                        for d_idx = 1:nDeployments
-                                            eig_i_d = Ki_full_eig{i}(:,d_idx);   % K x 1
-
-                                            for tr = 1:nTrials
-                                                rho_ref = D_template(:, t0_col_idx_per_trial(1,tr,d_idx));
-                                                rho_ref_v = U_D.' * rho_ref;   % K x 1, same eigenbasis
-
-                                                G_scalar = sum(rho_ref_v.^2 ./ eig_i_d);
-                                                c_scalar = sum(rho_ref_v .* u_i_v(:,tr,d_idx) ./ eig_i_d);
-                                                E_total  = sum(u_i_v(:,tr,d_idx).^2 ./ eig_i_d);
-
-                                                S_captured = c_scalar^2 / G_scalar;
-                                                T_align_all(1,i,tr,d_idx) = E_total - S_captured;
-                                            end
+                                    %% --- Normalized correlation vs. matched-filter template (median-delay) ---
+                                    % r_i = <u_i, rho_ref> / (||u_i|| ||rho_ref||), cosine similarity in [-1,1].
+                                    % rho_ref = D_template(:, t0_col_idx_per_trial), the median-delay template.
+                                    corr_min = 0.95;
+                                    norm_corr_all = zeros(1, S, nTrials, nDeployments);
+                                    for d_idx = 1:nDeployments
+                                        % K x nTrials matrix of templates, one column per trial (median delay)
+                                        rho_ref_mat = D_template(:, reshape(t0_col_idx_per_trial(1,:,d_idx), 1, nTrials));
+                                        rho_ref_norm = sqrt(sum(rho_ref_mat.^2, 1));            % 1 x nTrials
+                                        for i = 1:S
+                                            u_i = reshape(hat_u_all(:,i,:,d_idx), K, nTrials);   % K x nTrials
+                                            num_r = sum(rho_ref_mat .* u_i, 1);                  % 1 x nTrials
+                                            den_r = sqrt(sum(u_i.^2, 1)) .* rho_ref_norm;        % 1 x nTrials
+                                            norm_corr_all(1,i,:,d_idx) = reshape(num_r ./ den_r, 1, 1, nTrials);
                                         end
                                     end
 
-                                    delta_fa_align = 1e-6;
-                                    T_align_threshold = chi2inv(1-delta_fa_align, K-1);   % K-1 DOF: one direction removed
-                                    align_flagged = T_align_all > T_align_threshold;
-                                    flagged = flagged | align_flagged;
-
+                                    % MAD test across sensors, one-sided (only LOW correlation is suspicious).
+                                    % norm_corr_delta_k   = 3;      % multiplier on raw MAD
+                                    % norm_corr_min_scale = 0.02;   % floor on the scale, in correlation units (calibrate)
+                                    % 
+                                    % med_nc = median(norm_corr_all, 2);            % 1 x 1 x nTrials x nDeployments
+                                    % mad_nc = mad(norm_corr_all, 1, 2);            % raw MAD across sensors
+                                    % scale_nc = max(1.4826 * mad_nc, norm_corr_min_scale);
+                                    
+                                    % norm_corr_flagged = norm_corr_all < (med_nc - norm_corr_delta_k .* scale_nc);
+                                    norm_corr_flagged = norm_corr_all < corr_min;
+                                    flagged = flagged | norm_corr_flagged;   % uncomment to include in the union
+                                   
                                     %% --- Cross-sensor correlation consistency (Flagging IV) ---
                                     % Honest sensors are all copies of the SAME rho(t-bar_t0), so
                                     % they should correlate strongly with EACH OTHER, independent
                                     % of any noise-covariance model K_i. Fails differently than
                                     % T_i^align
-                                    gram = dt * pagemtimes(pagetranspose(hat_u_all), hat_u_all);   % S x S x nTrials x nDeployments
 
-                                    norm_sq = zeros(1,S,nTrials,nDeployments);
-                                    for s = 1:S
-                                        norm_sq(1,s,:,:) = gram(s,s,:,:);
-                                    end
-                                    norm_col = reshape(norm_sq, S,1,nTrials,nDeployments);
-                                    norm_row = reshape(norm_sq, 1,S,nTrials,nDeployments);
-                                    denom_corr = sqrt(pagemtimes(norm_col, norm_row));   % S x S x nTrials x nDeployments
-                                    corr_mat = gram ./ denom_corr;                        % normalized pairwise correlation, in [-1,1]
+                                    % gram = dt * pagemtimes(pagetranspose(hat_u_all), hat_u_all);   % S x S x nTrials x nDeployments
+                                    % 
+                                    % norm_sq = zeros(1,S,nTrials,nDeployments);
+                                    % for s = 1:S
+                                    %     norm_sq(1,s,:,:) = gram(s,s,:,:);
+                                    % end
+                                    % norm_col = reshape(norm_sq, S,1,nTrials,nDeployments);
+                                    % norm_row = reshape(norm_sq, 1,S,nTrials,nDeployments);
+                                    % denom_corr = sqrt(pagemtimes(norm_col, norm_row));   % S x S x nTrials x nDeployments
+                                    % corr_mat = gram ./ denom_corr;                        % normalized pairwise correlation, in [-1,1]
+                                    % 
+                                    % med_corr = zeros(1,S,nTrials,nDeployments);
+                                    % for i = 1:S
+                                    %     others = setdiff(1:S,i);
+                                    %     med_corr(1,i,:,:) = median(corr_mat(i,others,:,:), 2);
+                                    % end
+                                    % 
+                                    % corr_delta_k = 30;   % MAD multiplier, same convention as elsewhere
+                                    % med_of_meds = median(med_corr, 2);
+                                    % mad_corr = mad(med_corr, 1, 2);
 
-                                    med_corr = zeros(1,S,nTrials,nDeployments);
-                                    for i = 1:S
-                                        others = setdiff(1:S,i);
-                                        med_corr(1,i,:,:) = median(corr_mat(i,others,:,:), 2);
-                                    end
+                                    %% --- Pairwise disagreement vote (alternative to MAD-on-median-corr) ---
+                                    % Instead of reducing each sensor's row to one robust number and MAD-testing
+                                    % that, threshold each PAIRWISE correlation directly, then flag a sensor if
+                                    % it disagrees with a majority of the other S-1 sensors. More sensitive to
+                                    % the PATTERN of disagreement than a single reduced statistic; a sensor that
+                                    % disagrees with everyone looks different from one whose row-median happens
+                                    % to be pulled down/up by a colluding pair, even if both end up flagged.
 
-                                    corr_delta_k = 30;   % MAD multiplier, same convention as elsewhere
-                                    med_of_meds = median(med_corr, 2);
-                                    mad_corr = mad(med_corr, 1, 2);
+                                    % pair_flagged = corr_mat < corr_min;              % S x S x nTrials x nDeployments, pairwise
+                                    % Zero out the diagonal so self-correlation (always 1, never < corr_min
+                                    % anyway, but explicit is safer) never counts toward a sensor's fail count.
+                                    % for s = 1:S
+                                    %     pair_flagged(s,s,:,:) = false;
+                                    % end
 
-                                    corr_flagged = med_corr < (med_of_meds - corr_delta_k .* mad_corr);
-                                    % flagged = flagged | corr_flagged;
+                                    % fail_count = sum(pair_flagged, 2);                % S x 1 x nTrials x nDeployments: how many OTHER sensors each i disagrees with
+                                    % fail_count = reshape(fail_count, 1, S, nTrials, nDeployments);   % match the 1 x S x ... convention used elsewhere
+
+                                    % Flag if a sensor disagrees with a majority of the other S-1 sensors.
+                                    % majority_threshold = (S-1)/2;
+                                    % corr_vote_flagged = fail_count > majority_threshold;   % 1 x S x nTrials x nDeployments logical
+
+                                    % flagged = flagged | corr_vote_flagged;   % uncomment to include in the union
+
+                                    % corr_flagged = med_corr < (med_of_meds - corr_delta_k .* mad_corr);
+                                    % cross_corr_flagged = med_corr < corr_min;
+                                    % flagged = flagged | cross_corr_flagged;
                                     
                                     %% --- Individual (per-sensor) t0 and alpha estimation ---
                                     alpha_i_hat = zeros(1, S, nTrials, nDeployments);
                                     t0_i_hat    = zeros(1, S, nTrials, nDeployments);
                                     G_scalar_all = zeros(1, S, nTrials, nDeployments);
 
+                                    % for i = 1:S
+                                    %     u_i = reshape(hat_u_all(:,i,:,:), K, nTrials, nDeployments);
+                                    %     u_i_v = pagemtimes(U_D.', u_i);   % K x nTrials x nDeployments, in D_template's eigenbasis
+                                    % 
+                                    %     for d_idx = 1:nDeployments
+                                    %         eig_i_d = Ki_full_eig{i}(:,d_idx);   % K x 1
+                                    %         mi_val = mi_5d(1,i,1,1,d_idx);
+                                    % 
+                                    %         for tr = 1:nTrials
+                                    %             col_idx = t0_col_idx_per_sensor(i,tr,d_idx);
+                                    %             t0_i_hat(1,i,tr,d_idx) = t(col_idx);
+                                    % 
+                                    %             rho_ref = D_template(:, col_idx);
+                                    %             rho_ref_v = U_D.' * rho_ref;   % K x 1, same eigenbasis
+                                    % 
+                                    %             % GLS fit of u_i ~ (alpha_i * m_i^2) * rho_ref + noise,
+                                    %             % whitened by this sensor's OWN known noise model.
+                                    %             G_scalar = sum(rho_ref_v.^2 ./ eig_i_d);
+                                    %             c_scalar = sum(rho_ref_v .* u_i_v(:,tr,d_idx) ./ eig_i_d);
+                                    % 
+                                    %             alpha_i_hat(1,i,tr,d_idx) = c_scalar / (G_scalar * mi_val^2);
+                                    %             G_scalar_all(1,i,tr,d_idx) = G_scalar * mi_val^4;   % precision of alpha_i_hat itself (chain rule through the mi^2 scaling)
+                                    %         end
+                                    %     end
+                                    % end
+
                                     for i = 1:S
-                                        u_i = reshape(hat_u_all(:,i,:,:), K, nTrials, nDeployments);
-                                        u_i_v = pagemtimes(U_D.', u_i);   % K x nTrials x nDeployments, in D_template's eigenbasis
-
                                         for d_idx = 1:nDeployments
-                                            eig_i_d = Ki_full_eig{i}(:,d_idx);   % K x 1
                                             mi_val = mi_5d(1,i,1,1,d_idx);
-
                                             for tr = 1:nTrials
                                                 col_idx = t0_col_idx_per_sensor(i,tr,d_idx);
                                                 t0_i_hat(1,i,tr,d_idx) = t(col_idx);
 
-                                                rho_ref = D_template(:, col_idx);
-                                                rho_ref_v = U_D.' * rho_ref;   % K x 1, same eigenbasis
-
-                                                % GLS fit of u_i ~ (alpha_i * m_i^2) * rho_ref + noise,
-                                                % whitened by this sensor's OWN known noise model.
-                                                G_scalar = sum(rho_ref_v.^2 ./ eig_i_d);
-                                                c_scalar = sum(rho_ref_v .* u_i_v(:,tr,d_idx) ./ eig_i_d);
+                                                G_scalar = G_scalar_at_best(i,tr,d_idx);
+                                                c_scalar = c_scalar_at_best(i,tr,d_idx);
 
                                                 alpha_i_hat(1,i,tr,d_idx) = c_scalar / (G_scalar * mi_val^2);
-                                                G_scalar_all(1,i,tr,d_idx) = G_scalar * mi_val^4;   % precision of alpha_i_hat itself (chain rule through the mi^2 scaling)
+                                                G_scalar_all(1,i,tr,d_idx) = G_scalar * mi_val^4;
                                             end
                                         end
                                     end
-
-                                    %% --- Sensor-vs-sensor amplitude consistency (Capability A defense) ---
-                                    alpha_delta_k = 50;   % MAD multiplier, same convention as elsewhere
-                                    med_alpha = median(alpha_i_hat, 2);   % 1 x S x nTrials x nDeployments
-                                    mad_alpha = mad(alpha_i_hat, 1, 2);   % median absolute deviation across sensors
-                                    diff_alpha = abs(alpha_i_hat - med_alpha);
-
-                                    alpha_flagged = diff_alpha > (alpha_delta_k .* mad_alpha);
-                                    % flagged = flagged | alpha_flagged;
-
+                                    
                                     %%
                                     % Per-sensor t0 precision, via finite-difference derivative
                                     % of D_template's columns -- same GLS-energy structure as
@@ -847,10 +939,12 @@ for experiment_idx = 1:numel(experiment_list)
                                         end
                                     end
 
-                                    k_trim = 1;
+                                    %% --- Compute trimmed median estimates
+                                    k_trim = floor(S/2)/2;
                                     sorted_alpha = sort(alpha_i_hat, 2);
-                                    alpha_estimates_trimmed = mean(sorted_alpha(1,k_trim+1:end-k_trim,:,:), 2);
-                                    t0_estimates_trimmed = reshape(t(t0_col_idx_per_trial), 1,1,nTrials,nDeployments);
+                                    sorted_t0 = sort(t0_i_hat, 2);
+                                    alpha_estimates_trimmed = median(sorted_alpha(1,k_trim+1:end-k_trim,:,:), 2);
+                                    t0_estimates_trimmed = median(sorted_t0(1,k_trim+1:end-k_trim,:,:), 2); % reshape(t(t0_col_idx_per_trial), 1,1,nTrials,nDeployments);
 
                                     %% --- Undefended array-level presence check (Q statistic) ---
                                     % Cheap, no per-sensor flagging, no |B|<S/2 assumption needed --
@@ -861,83 +955,97 @@ for experiment_idx = 1:numel(experiment_list)
                                     % legitimate version of the Lambda(empty-set) gate idea from
                                     % earlier, which failed only because it lacked this self-
                                     % consistency property.
-                                    G_pooled_num = sum(G_scalar_all .* alpha_i_hat, 2);
-                                    G_pooled_den = sum(G_scalar_all, 2);
-                                    alpha_pooled = G_pooled_num ./ G_pooled_den;   % 1 x 1 x nTrials x nDeployments
+                                    
+                                    % G_pooled_num = sum(G_scalar_all .* alpha_i_hat, 2);
+                                    % G_pooled_den = sum(G_scalar_all, 2);
+                                    % alpha_pooled = G_pooled_num ./ G_pooled_den;   % 1 x 1 x nTrials x nDeployments
+                                    % 
+                                    % Q_stat = sum(G_scalar_all .* (alpha_i_hat - alpha_pooled).^2, 2);   % 1 x 1 x nTrials x nDeployments
+                                    % delta_fa_Q = 1e-3;
+                                    % Q_threshold = chi2inv(1-delta_fa_Q, S-1);
+                                    % 
+                                    % array_suspected = Q_stat > Q_threshold;   % 1 x 1 x nTrials x nDeployments logical
+                                    % 
+                                    % tau_pooled_num = sum(lambda_t0_all .* t0_i_hat, 2);
+                                    % tau_pooled_den = sum(lambda_t0_all, 2);
+                                    % tau_pooled = tau_pooled_num ./ tau_pooled_den;
+                                    % 
+                                    % Q_tau_stat = sum(lambda_t0_all .* (t0_i_hat - tau_pooled).^2, 2);
+                                    % Q_tau_threshold = chi2inv(1-delta_fa_Q, S-1);
+                                    % array_suspected_tau = Q_tau_stat > Q_tau_threshold;
 
-                                    Q_stat = sum(G_scalar_all .* (alpha_i_hat - alpha_pooled).^2, 2);   % 1 x 1 x nTrials x nDeployments
-                                    delta_fa_Q = 1e-3;
-                                    Q_threshold = chi2inv(1-delta_fa_Q, S-1);
+                                    %% --- MAD Test
+                                    med_alpha = median(alpha_i_hat, 2);   % 1 x S x nTrials x nDeployments
+                                    mad_alpha = mad(alpha_i_hat, 1, 2);   % median absolute deviation across sensors
+                                    med_t0 = median(t0_i_hat, 2);
+                                    mad_t0 = mad(t0_i_hat, 1, 2);
 
-                                    array_suspected = Q_stat > Q_threshold;   % 1 x 1 x nTrials x nDeployments logical
+                                    alpha_tol = alpha_true * 0.1;
+                                    t0_tol = t0_true * 0.1;
+                                    t0_idx_tol = ceil(t0_true * 0.1/dt);
+                                    
+                                    %%% With alpha
+                                    alpha_delta_k = 5;
+                                    alpha_z = (alpha_i_hat - med_alpha);
+                                    alpha_flagged = abs(alpha_z) > max(alpha_tol, alpha_delta_k*mad_alpha);
+                                    flagged = flagged | alpha_flagged;
 
-                                    tau_pooled_num = sum(lambda_t0_all .* t0_i_hat, 2);
-                                    tau_pooled_den = sum(lambda_t0_all, 2);
-                                    tau_pooled = tau_pooled_num ./ tau_pooled_den;
-
-                                    Q_tau_stat = sum(lambda_t0_all .* (t0_i_hat - tau_pooled).^2, 2);
-                                    Q_tau_threshold = chi2inv(1-delta_fa_Q, S-1);
-                                    array_suspected_tau = Q_tau_stat > Q_tau_threshold;
+                                    %%% With t0
+                                    t0_delta_k = 5;
+                                    t0_z = t0_i_hat - med_t0;
+                                    t0_flagged = abs(t0_z) > max(t0_tol, t0_delta_k*mad_t0);
+                                    flagged = flagged | t0_flagged;
 
                                     %% --- Z-Score test
-                                    z_delta_alpha = norminv(1 - 1e-6/2);   % two-sided, exact Gaussian tail
-                                    alpha_z = (alpha_i_hat - med_alpha);
-                                    z_flagged_alpha = abs(alpha_z) > z_delta_alpha;
 
-                                    z_delta_tau = norminv(1 - 1e-8/2);
-                                    med_tau = median(t0_i_hat, 2);
-                                    tau_z = (t0_i_hat - med_tau) .* sqrt(lambda_t0_all);
-                                    z_flagged_tau = abs(tau_z) > z_delta_tau;
-
-                                    sigma_alpha = sqrt(1 ./ G_scalar_all);
-                                    three_sigma_flagged = alpha_z > 3*sigma_alpha;
-
-                                    sigma_alpha = sqrt(1 ./ G_scalar_all);            % per-sensor sigma_i, already have this
-                                    sigma_bar_sq = mean(sigma_alpha.^2, 2);             % typical variance across the group
-                                    median_var = (pi/2) * sigma_bar_sq / S;             % variance of the SAMPLE MEDIAN itself
-
-                                    combined_sigma = sqrt(sigma_alpha.^2 + median_var);  % properly accounts for BOTH sources of noise
-
-                                    z_delta = norminv(1 - 1e-6/2);
-                                    z_flagged_alpha_corrected = abs(alpha_i_hat - med_alpha) > z_delta * combined_sigma;
-
-                                    %% --- MCD test
-                                    mcd_flagged = false(1,S,nTrials,nDeployments);
-                                    % for tr = 1:nTrials
-                                    %     for d_idx = 1:nDeployments
-                                    %         X = [squeeze(alpha_i_hat(1,:,tr,d_idx)); squeeze(t0_i_hat(1,:,tr,d_idx))].';   % S x 2
-                                    %         [~,~,mahal_d] = robustcov(X);
-                                    %         mcd_flagged(1,:,tr,d_idx) = mahal_d > chi2inv(0.975,2);
-                                    %     end
-                                    % end
+                                    % %%% --- Z-score alpha
+                                    % z_delta_alpha = norminv(1 - 1e-3/2);   % two-sided, exact Gaussian tail
+                                    % z_flagged_alpha = abs(alpha_z) > z_delta_alpha;
+                                    % 
+                                    % %%% --- Z-score tau
+                                    % z_delta_tau = norminv(1 - 1e-8/2);
+                                    % tau_z = (t0_i_hat - med_t0) .* sqrt(lambda_t0_all);
+                                    % z_flagged_tau = abs(tau_z) > z_delta_tau;
+                                    % 
+                                    % %%% --- Z-score sigma
+                                    % sigma_alpha = sqrt(1 ./ G_scalar_all);
+                                    % three_sigma_flagged = alpha_z > 3*sigma_alpha;
+                                    % 
+                                    % %%% --- alpha corrected
+                                    % sigma_alpha = sqrt(1 ./ G_scalar_all);            % per-sensor sigma_i, already have this
+                                    % sigma_bar_sq = mean(sigma_alpha.^2, 2);             % typical variance across the group
+                                    % median_var = (pi/2) * sigma_bar_sq / S;             % variance of the SAMPLE MEDIAN itself
+                                    % 
+                                    % combined_sigma = sqrt(sigma_alpha.^2 + median_var);  % properly accounts for BOTH sources of noise
+                                    % 
+                                    % z_delta = norminv(1 - 1e-6/2);
+                                    % z_flagged_alpha_corrected = abs(alpha_i_hat - med_alpha) > z_delta * combined_sigma;
 
                                     %% --- Relative waveform peak comparisons
-                                    [peak_vals,peak_idx_vals] = max(hat_u_all ./ (max(D_template,[],"all") .* mi_4d.^2));
-                                    val_delta_k = 3;
-                                    idx_delta_k = 3;
-
-                                    alpha_tol = alpha_true * 0.15;
-                                    t0_idx_tol = ceil(t0_true * 0.1/dt);
-
-                                    % nmhuv = max hat u val
-                                    med_peak_val = median(peak_vals, 2);
-                                    mad_peak_val = mad(peak_vals, 1, 2);
-
-                                    % nmhui = max hat u idx
-                                    med_peak_idx = median(peak_idx_vals, 2);
-                                    mad_peak_idx = mad(peak_idx_vals, 1, 2);
-
-                                    alpha_diff = abs(peak_vals - med_peak_val);
-                                    t0_idx_diff = abs(peak_idx_vals - med_peak_idx);
-
-                                    alpha_thresh = (val_delta_k .* mad_peak_val);
-                                    t0_idx_thresh = (idx_delta_k .* mad_peak_idx);
                                     
-                                    peak_val_flagged = alpha_diff > max(alpha_thresh, alpha_tol);
-                                    peak_idx_flagged = t0_idx_diff > max(t0_idx_thresh, t0_idx_tol);
+                                    % [peak_vals,peak_idx_vals] = max(hat_u_all ./ (max(D_template,[],"all") .* mi_4d.^2));
+                                    % val_delta_k = 3;
+                                    % idx_delta_k = 3;
+                                    % 
+                                    % % nmhuv = max hat u val
+                                    % med_peak_val = median(peak_vals, 2);
+                                    % mad_peak_val = mad(peak_vals, 1, 2);
+                                    % 
+                                    % % nmhui = max hat u idx
+                                    % med_peak_idx = median(peak_idx_vals, 2);
+                                    % mad_peak_idx = mad(peak_idx_vals, 1, 2);
+                                    % 
+                                    % alpha_diff = abs(peak_vals - med_peak_val);
+                                    % t0_idx_diff = abs(peak_idx_vals - med_peak_idx);
+                                    % 
+                                    % alpha_thresh = (val_delta_k .* mad_peak_val);
+                                    % t0_idx_thresh = (idx_delta_k .* mad_peak_idx);
+                                    % 
+                                    % peak_val_flagged = alpha_diff > max(alpha_thresh, alpha_tol);
+                                    % peak_idx_flagged = t0_idx_diff > max(t0_idx_thresh, t0_idx_tol);
 
-                                    flagged = flagged | peak_val_flagged;
-                                    flagged = flagged | peak_idx_flagged;
+                                    % flagged = flagged | peak_val_flagged;
+                                    % flagged = flagged | peak_idx_flagged;
 
                                     honest_idx = setdiff(1:S, attacker_idx);
 
@@ -992,7 +1100,7 @@ for experiment_idx = 1:numel(experiment_list)
                                     [max_y_vals,I] = max(mf_with_z_sum(:,:,offset_idx:end,:,:), [], 3);
                                     I = I + offset_idx - 1;
                                     t0_estimates_for_plot = reshape((I-1)*dt, 1, 1, nTrials, nDeployments);
-                                    t0_estimates_for_alpha = t0_true*ones(1,1,nTrials,nDeployments);
+                                    t0_estimates_for_alpha = t0_estimates_for_plot; % t0_true*ones(1,1,nTrials,nDeployments);
 
                                     % Recompute the RAW (unweighted) pulse correlation at t0_estimates_for_alpha.
                                     % No mi weighting here -- mu = mi^2 is already folded into b_m via W*G_R*mu.
@@ -1021,7 +1129,9 @@ for experiment_idx = 1:numel(experiment_list)
                                     end
                                     alpha_estimates = num ./ denom;
 
-                                    num_bs = zeros(1,1,nTrials,nDeployments); denom_bs = num_bs;
+                                    num_bs = zeros(1,1,nTrials,nDeployments);
+                                    denom_bs = num_bs;
+                                    
                                     for m_idx = 1:Mtot
                                         b_m = reshape(WG_Rmu(m_idx,:),1,1,1,nDeployments);
                                         resh_Omega_bs = reshape(b_m .* Rss_tensor,1,K,nTrials,nDeployments);
@@ -1104,7 +1214,7 @@ for experiment_idx = 1:numel(experiment_list)
                                                 % fully per-trial, no averaging across trials.
                                                 amp_deviation = abs(alpha_i_hat(1,F,tr,d_idx) - med_alpha(1,1,tr,d_idx)) ./ mad_alpha(1,1,tr,d_idx);
                                                 corr_deviation = (med_of_meds(1,1,tr,d_idx) - med_corr(1,F,tr,d_idx)) ./ mad_corr(1,1,tr,d_idx);
-                                                Ti_this = T_i_all(1,F,tr,d_idx) / T_threshold ...
+                                                Ti_this = Ti_all(1,F,tr,d_idx) / T_threshold ...
                                                         + T_align_all(1,F,tr,d_idx) / T_align_threshold ...
                                                         + amp_deviation ...
                                                         + max(corr_deviation, 0) ...
@@ -1200,31 +1310,25 @@ for experiment_idx = 1:numel(experiment_list)
                                         log_msg(verbosity_level, 4, 'Detection accuracy: TP=%d, FP=%d, FN=%d', tp_total, fp_total, fn_total);
 
                                         honest_idx_diag = setdiff(1:S, attacker_idx);
-                                        fp_Ti     = mean(T_i_all(1,honest_idx_diag,:,:) > T_threshold, 'all');
-                                        fp_sign   = mean(sign_flagged(1,honest_idx_diag,:,:), 'all');
-                                        fp_align  = mean(align_flagged(1,honest_idx_diag,:,:), 'all');
-                                        fp_alpha = mean(alpha_flagged(1,honest_idx_diag,:,:), 'all');
-                                        fp_corr = mean(corr_flagged(1,honest_idx_diag,:,:), 'all');
-                                        fp_peakval   = mean(peak_val_flagged(1,honest_idx_diag,:,:), 'all');
-                                        fp_peakshift = mean(peak_idx_flagged(1,honest_idx_diag,:,:), 'all');
-                                        fp_Qtau = mean(array_suspected_tau(1,1,:,:), 'all');
-                                        fp_z_alpha = mean(z_flagged_alpha(1,honest_idx_diag,:,:), 'all');
-                                        fp_z_tau = mean(z_flagged_tau(1,honest_idx_diag,:,:), 'all');
-                                        fp_mcd = mean(mcd_flagged(1,honest_idx_diag,:,:), 'all');
-                                        fp_threesigma = mean(three_sigma_flagged(1,honest_idx_diag,:,:), 'all');
-                                        fp_alpha_corrected = mean(z_flagged_alpha_corrected(1,honest_idx_diag,:,:), 'all');
-                                        fp_combined = mean(flagged(1,honest_idx_diag,:,:), 'all');
-
-                                        % log_msg(verbosity_level, 4, 'FP rate -- T_i: %.4f | sign: %.4f | align: %.4f | amplitude: %0.4f | corr: %.4f | peakval: %.4f | peakshift: %.4f | Qtau: %.4f | z_a: %.4f | z_t: %.4f | mcd: %.4f | combined: %.4f', ...
-                                        %     fp_Ti, fp_sign, fp_align, fp_amplitude, fp_corr, fp_peakval, fp_peakshift, fp_Qtau, fp_z_alpha, fp_z_tau, fp_mcd, fp_combined);
                                         
-                                        fp_names = ["T_i","sign","align","alpha","corr","peakval","peakshift","Qtau","z_a","z_t","mcd","threesigma","alphacorrected","combined"];
-                                        fp_vals  = [fp_Ti, fp_sign, fp_align, fp_alpha, fp_corr, fp_peakval, fp_peakshift, fp_Qtau, fp_z_alpha, fp_z_tau, fp_mcd, fp_threesigma, fp_alpha_corrected, fp_combined];
-
-                                        log_msg(verbosity_level, 4, 'FP rate --');
-                                        for k = 1:numel(fp_names)
-                                            log_msg(verbosity_level, 4, '  %-10s %.4f', fp_names(k), fp_vals(k));
-                                        end
+                                        % --- FP rate lookup: one struct/map holding every test's honest-sensor FP
+                                        % rate, keyed by name. Add a test with one line; call fp_stats('name') or
+                                        % dump the whole thing with fp_report(fp_stats) any time you want a look.
+                                        fp_stats = containers.Map('KeyType','char','ValueType','double');
+                                        % fp_stats('T_i')            = mean(Ti_flagged(1,honest_idx_diag,:,:), 'all');
+                                        % fp_stats('sign')           = mean(sign_flagged(1,honest_idx_diag,:,:), 'all');
+                                        % fp_stats('align')          = mean(align_flagged(1,honest_idx_diag,:,:), 'all');
+                                        % fp_stats('corr')           = mean(corr_flagged(1,honest_idx_diag,:,:), 'all');
+                                        % fp_stats('corrvote')       = mean(corr_vote_flagged(1,honest_idx_diag,:,:), 'all');
+                                        % fp_stats('peakval')        = mean(peak_val_flagged(1,honest_idx_diag,:,:), 'all');
+                                        % fp_stats('peakshift')      = mean(peak_idx_flagged(1,honest_idx_diag,:,:), 'all');
+                                        % fp_stats('alphacorrected') = mean(z_flagged_alpha_corrected(1,honest_idx_diag,:,:), 'all');
+                                        fp_stats('alpha_i')          = mean(alpha_flagged(1,honest_idx_diag,:,:), 'all');
+                                        fp_stats('t0_i')             = mean(t0_flagged(1,honest_idx_diag,:,:), 'all');
+                                        fp_stats('normcorr')         = mean(norm_corr_flagged(1,honest_idx_diag,:,:), 'all');
+                                        fp_stats('combined')         = mean(flagged(1,honest_idx_diag,:,:), 'all');
+                                        
+                                        fp_report(fp_stats, verbosity_level);
                                     end
 
                                     alpha_estimates = alpha_final;
