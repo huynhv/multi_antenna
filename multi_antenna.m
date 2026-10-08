@@ -1,9 +1,8 @@
-%%% 10-5-2026 LEFT OFF IN CLAUDE CODE --> have it fix things noticed but
-%%% didn't change
+%%% 10-6-2026 --> revisit tomorrow
 
 % Clear all variables and close all existing figures.
 clearvars
-% close all
+close all
 
 addpath('.\functions')
 verbosity_level = 5;   % 1 = major sections only, 2 = + sub-steps/channel-SNR, 3 = + diagnostics
@@ -119,7 +118,6 @@ N = 2*K - 1;
 t0_grid_top = repmat(reshape(t,1,1,[]), 1,1,1,nDeployments);
 [~, R00_full] = mf_integral_fft(sensor_signal(t-t0_grid_top,Tp,norm_fact), sensor_signal(t,Tp,norm_fact), 1, 1, K, dt, Tp);
 D_template = reshape(R00_full(:,:,:,1), K, K);   % K x K, [D_template]_{k,l} = rho(t_k - t_l)
-mfTemplateFFT_raw = fft(sensor_signal(t, Tp, norm_fact), N, 1);   % used by estimate_with_geometry
 
 [U_D, Sigma_D, ~] = svd(D_template, 'econ');
 sv_energy = cumsum(diag(Sigma_D).^2) / sum(diag(Sigma_D).^2);
@@ -139,22 +137,13 @@ lam_D = diag(Sigma_D);   % K x 1
 % Project D_template's columns into U_D's eigenbasis once -- reused every
 % (sensor, deployment) below since it doesn't depend on either.
 D_template_v = U_D.' * D_template;   % K x K
+mfTemplateFFT_raw = fft(sensor_signal(t, Tp, norm_fact), N, 1);   % used by estimate_with_geometry
 
 log_msg(verbosity_level, 1, 'Subspace-projection residual test: d = %d, K-d = %d', d_sub, K-d_sub);
 
 %% Define Anonymous Expressions
 mag_sqr_S0_internal = @(w) (norm_fact^2) * (2*Bee.^2 .* (1 + cos(w.*pi./Bee)) ) ./ (w.^2 - Bee.^2).^2;
 mag_sqr_S0 = @(w) zeroIfnan(mag_sqr_S0_internal(w)) + (w == Bee | w == -Bee) .* (mag_sqr_S0_internal(w-epsilon) + mag_sqr_S0_internal(w+epsilon))./2;
-
-%%% Expressions for original manuscript
-V_arr_internal = @(w, ai, mi, ci) scaled_w_psd_constant .* sum(ci.^2 .* ai.^2 .* mi.^2, 2) .* mag_sqr_S0_internal(w) + scaled_n_psd_constant/2;
-V_arr = @(w, ai, mi, ci) zeroIfnan(V_arr_internal(w, ai, mi, ci)) + (w == Bee | w == -Bee) .* (V_arr_internal(w-epsilon, ai, mi, ci) + V_arr_internal(w+epsilon, ai, mi, ci))./2;
-
-H_arr_internal = @(w, ai, mi, ci) (1 + epsilon) ./ (V_arr_internal(w, ai, mi, ci) + epsilon);
-H_arr = @(w, ai, mi, ci) zeroIfnan(H_arr_internal(w, ai, mi, ci)) + (w == Bee | w == -Bee) .* (H_arr_internal(w-epsilon, ai, mi, ci) + H_arr_internal(w+epsilon, ai, mi, ci))./2;
-
-alpha_objective_array = @(ai, mi, ci) (2*pi) ./( ((sum(ci .* ai .* mi.^2)).^2) .* integral(@(w) (mag_sqr_S0(w)).^2 ./ V_arr(w, ai, mi, ci), -Inf, Inf, 'ArrayValued', true));
-t0_objective_array = @(ai, mi, ci, arb_alpha) (2*pi) ./( (arb_alpha^2 .* (sum(ci .* ai .* mi.^2)).^2) .* integral(@(w) (w .* mag_sqr_S0(w)).^2 ./ V_arr(w,ai, mi, ci), -Inf, Inf, 'ArrayValued', true));
 
 %%% Expressions for multi-antenna
 Vm_arr_internal = @(w, lambda) lambda .* mag_sqr_S0_internal(w) + 1;
@@ -343,37 +332,6 @@ for experiment_idx = 1:numel(experiment_list)
                         end
                     end
 
-                    % %% --- Byzantine attacker: overwrite compromised sensor(s)' transmitted
-                    % % signal with unstructured noise, in place of their honest ui(t). ---
-                    % if attacker_enabled
-                    %     active_attackers = attacker_idx(attacker_idx <= S);
-                    %     if attack_type == "flip"
-                    %         % Sign-flip: -alpha * m_i^2 * rho(t-t0) - w_i(t)
-                    %         for a = active_attackers
-                    %             ui(:, a, :, :, :) = -ui(:, a, :, :, :);
-                    %         end
-                    %     elseif attack_type == "amplitude scale"
-                    %         % General amplitude lie: beta * alpha * m_i^2 * rho(t-t0) +
-                    %         % beta * w_i(t)
-                    %         attacker_beta = 0.1;
-                    %         for a = active_attackers
-                    %             ui(:, a, :, :, :) = attacker_beta * ui(:, a, :, :, :);
-                    %         end
-                    %     elseif attack_type == "time shift"
-                    %         % General time shift, truncate any segment of
-                    %         % the waveform that falls outside of [0, T0]
-                    %         t0_attacker = 3;
-                    %         t0_shift = t0_attacker - t0_true;
-                    %         for a = active_attackers
-                    %             ui(:, a, :, :, :) = shift_waveform(ui(:, a, :, :, :), t, t0_shift);
-                    %         end
-                    %     else
-                    %         for a = active_attackers
-                    %             ui(:, a, :, :, :) = scaled_attacker_noise(:, a, :, :, :);
-                    %         end
-                    %     end
-                    % end
-
                     %% Define search space for t0
                     if ~use_W
                         t0_search_space = repmat(reshape(t,1,1,[]), 1,1,1,nDeployments);
@@ -407,97 +365,6 @@ for experiment_idx = 1:numel(experiment_list)
                         [UB_transpose_oracle, lambda_B_base_oracle] = whitening_basis(G_R_oracle, m_oracle, gamma_w);
                         mu_oracle = m_oracle.^2;
                     end
-                    
-                    % %% Compute values for multi-antenna
-                    % m = reshape(mi_5d, S, nDeployments);           % S x nDeployments
-                    % g = reshape(g_tilde, S, num_antennas, nDeployments);       % S x num_antennas x nDeployments (complex, per-antenna compensated gain)
-                    % 
-                    % G_R = cat(2, real(g), imag(g));
-                    % G_R = permute(G_R, [2,1,3]);   % Mtot x S x nDeployments (channel-independent)
-                    % 
-                    % combined_noise_psd = reshape(m.^2 .* gamma_w, S, 1, nDeployments);
-                    % Dmat = eye(S) .* combined_noise_psd;   % S x S x nDeployments
-                    % 
-                    % % ---- channel-INDEPENDENT: spatial kernel + eigenvectors (once per deployment) ----
-                    % 
-                    % % --- Hermitian part: A = E{v v^H} spatial kernel (M x M x nDeployments) ---
-                    % A = pagemtimes(pagemtimes(pagetranspose(g), Dmat), conj(g));
-                    % A = (A + pagectranspose(A)) / 2;
-                    % 
-                    % % --- Pseudo-covariance part: Atilde = E{v v^T} (no conjugate) ---
-                    % Atilde = pagemtimes(pagemtimes(pagetranspose(g), Dmat), g);
-                    % Atilde = (Atilde + pagetranspose(Atilde)) / 2;
-                    % 
-                    % B11 =  0.5 * real(A + Atilde);
-                    % B12 = -0.5 * imag(A - Atilde);
-                    % B21 =  0.5 * imag(A + Atilde);
-                    % B22 =  0.5 * real(A - Atilde);
-                    % 
-                    % B = cat(1, cat(2, B11, B12), cat(2, B21, B22));   % 2M x 2M x nDeployments
-                    % B = (B + pagetranspose(B)) / 2;
-                    % 
-                    % % Eigen-decompose B ITSELF (not Bprime).  Because Sigma_n_R is a scalar multiple
-                    % % of I, Bprime = (2/gamma_n)*B, so the eigenVECTORS are those of B and only the
-                    % % eigenVALUES scale with channel SNR.
-                    % [U_B, Lam_B] = pageeig(B);
-                    % for d_idx = 1:nDeployments
-                    %     [lam_sorted, idx] = sort(diag(Lam_B(:,:,d_idx)), 'descend');
-                    %     U_B(:,:,d_idx)      = U_B(:,idx,d_idx);
-                    %     Lam_B(:,:,d_idx)    = diag(lam_sorted);
-                    % end
-                    % 
-                    % UB_transpose  = pagetranspose(U_B);               % 2M x 2M x nDeployments  <-- cached "W base"
-                    % lambda_B_base = zeros(Mtot, nDeployments);        % 2M x nDeployments
-                    % for d_idx = 1:nDeployments
-                    %     lambda_B_base(:,d_idx) = diag(Lam_B(:,:,d_idx));
-                    % end
-                    % 
-                    % % --- Oracle CRLB: rebuild the SAME channel-independent pipeline above,
-                    % % using ONLY the honest S-1 sensors -- as if the attacker's slot never
-                    % % existed. No nulling geometry involved; this is the ordinary CRLB
-                    % % construction, just restricted to a smaller sensor set from the start.
-                    % if attacker_enabled
-                    %     honest_only = setdiff(1:S, attacker_idx);
-                    %     S_honest = numel(honest_only);
-                    % 
-                    %     m_oracle = m(honest_only,:);                    % S_honest x nDeployments
-                    %     g_oracle = g(honest_only,:,:);                  % S_honest x num_antennas x nDeployments
-                    % 
-                    %     G_R_oracle = cat(2, real(g_oracle), imag(g_oracle));
-                    %     G_R_oracle = permute(G_R_oracle, [2,1,3]);      % Mtot x S_honest x nDeployments
-                    % 
-                    %     combined_noise_psd_oracle = reshape(m_oracle.^2 .* gamma_w, S_honest, 1, nDeployments);
-                    %     Dmat_oracle = eye(S_honest) .* combined_noise_psd_oracle;   % S_honest x S_honest x nDeployments
-                    % 
-                    %     A_oracle = pagemtimes(pagemtimes(pagetranspose(g_oracle), Dmat_oracle), conj(g_oracle));
-                    %     A_oracle = (A_oracle + pagectranspose(A_oracle)) / 2;
-                    % 
-                    %     Atilde_oracle = pagemtimes(pagemtimes(pagetranspose(g_oracle), Dmat_oracle), g_oracle);
-                    %     Atilde_oracle = (Atilde_oracle + pagetranspose(Atilde_oracle)) / 2;
-                    % 
-                    %     B11_o =  0.5 * real(A_oracle + Atilde_oracle);
-                    %     B12_o = -0.5 * imag(A_oracle - Atilde_oracle);
-                    %     B21_o =  0.5 * imag(A_oracle + Atilde_oracle);
-                    %     B22_o =  0.5 * real(A_oracle - Atilde_oracle);
-                    % 
-                    %     B_oracle = cat(1, cat(2, B11_o, B12_o), cat(2, B21_o, B22_o));   % 2M x 2M x nDeployments
-                    %     B_oracle = (B_oracle + pagetranspose(B_oracle)) / 2;
-                    % 
-                    %     [U_B_oracle, Lam_B_oracle] = pageeig(B_oracle);
-                    %     for d_idx = 1:nDeployments
-                    %         [lam_sorted_o, idx_o] = sort(diag(Lam_B_oracle(:,:,d_idx)), 'descend');
-                    %         U_B_oracle(:,:,d_idx)   = U_B_oracle(:,idx_o,d_idx);
-                    %         Lam_B_oracle(:,:,d_idx) = diag(lam_sorted_o);
-                    %     end
-                    % 
-                    %     UB_transpose_oracle  = pagetranspose(U_B_oracle);         % 2M x 2M x nDeployments
-                    %     lambda_B_base_oracle = zeros(Mtot, nDeployments);
-                    %     for d_idx = 1:nDeployments
-                    %         lambda_B_base_oracle(:,d_idx) = diag(Lam_B_oracle(:,:,d_idx));
-                    %     end
-                    % 
-                    %     mu_oracle = m_oracle.^2;
-                    % end
 
                     %% --- Precompute null-space isolation projectors (channel-independent;
                     % reused across every channel-SNR point and trial for this S/scheme) ---
@@ -538,6 +405,16 @@ for experiment_idx = 1:numel(experiment_list)
                             % equivalent to applying an anti-aliasing filter.
                             scaled_n = sqrt( (gamma_n*n_psd_constant/dt) / 2 ) * n;
                             scaled_n_psd_constant = gamma_n * n_psd_constant; % == N0/2
+
+                            %%% Expressions for original manuscript
+                            V_arr_internal = @(w, ai, mi, ci) scaled_w_psd_constant .* sum(ci.^2 .* ai.^2 .* mi.^2, 2) .* mag_sqr_S0_internal(w) + scaled_n_psd_constant/2;
+                            V_arr = @(w, ai, mi, ci) zeroIfnan(V_arr_internal(w, ai, mi, ci)) + (w == Bee | w == -Bee) .* (V_arr_internal(w-epsilon, ai, mi, ci) + V_arr_internal(w+epsilon, ai, mi, ci))./2;
+
+                            H_arr_internal = @(w, ai, mi, ci) (1 + epsilon) ./ (V_arr_internal(w, ai, mi, ci) + epsilon);
+                            H_arr = @(w, ai, mi, ci) zeroIfnan(H_arr_internal(w, ai, mi, ci)) + (w == Bee | w == -Bee) .* (H_arr_internal(w-epsilon, ai, mi, ci) + H_arr_internal(w+epsilon, ai, mi, ci))./2;
+
+                            alpha_objective_array = @(ai, mi, ci) (2*pi) ./( ((sum(ci .* ai .* mi.^2)).^2) .* integral(@(w) (mag_sqr_S0(w)).^2 ./ V_arr(w, ai, mi, ci), -Inf, Inf, 'ArrayValued', true));
+                            t0_objective_array = @(ai, mi, ci, arb_alpha) (2*pi) ./( (arb_alpha^2 .* (sum(ci .* ai .* mi.^2)).^2) .* integral(@(w) (w .* mag_sqr_S0(w)).^2 ./ V_arr(w,ai, mi, ci), -Inf, Inf, 'ArrayValued', true));
 
                             % --- Per-sensor known noise covariance for the residual test:
                             % K_i = m_i^2*(Nw/2)*Rss_Psi + (N0/2)/||breve_g_i||^2 * I.
@@ -687,19 +564,6 @@ for experiment_idx = 1:numel(experiment_list)
                                         end
                                     end
 
-                                    % t0_col_idx_per_trial = zeros(1, nTrials, nDeployments);
-                                    % for d_idx = 1:nDeployments
-                                    %     for tr = 1:nTrials
-                                    %         % already_flagged = find(flagged(1,:,tr,d_idx));
-                                    %         % candidates = setdiff(1:S, already_flagged);
-                                    %         candidates = [];
-                                    %         if isempty(candidates)
-                                    %             candidates = 1:S;   % fallback: everyone flagged, use all anyway
-                                    %         end
-                                    %         t0_col_idx_per_trial(1,tr,d_idx) = round(median(t0_col_idx_per_sensor(candidates,tr,d_idx)));
-                                    %     end
-                                    % end
-
                                     t0_col_idx_per_trial = round(median(t0_col_idx_per_sensor, 1));   % 1 x nTrials x nDeployments
 
                                     %% --- Normalized correlation vs. matched-filter template (median-delay) ---
@@ -726,27 +590,6 @@ for experiment_idx = 1:numel(experiment_list)
                                     mi_sq = reshape(mi_5d.^2, S, 1, nDeployments);
                                     t0_i_hat    = reshape(t(t0_col_idx_per_sensor), 1, S, nTrials, nDeployments);
                                     alpha_i_hat = reshape(c_scalar_at_best ./ (G_scalar_at_best .* mi_sq), 1, S, nTrials, nDeployments);
-
-                                    % %% --- Individual (per-sensor) t0 and alpha estimation ---
-                                    % alpha_i_hat = zeros(1, S, nTrials, nDeployments);
-                                    % t0_i_hat    = zeros(1, S, nTrials, nDeployments);
-                                    % G_scalar_all = zeros(1, S, nTrials, nDeployments);
-                                    % 
-                                    % for i = 1:S
-                                    %     for d_idx = 1:nDeployments
-                                    %         mi_val = mi_5d(1,i,1,1,d_idx);
-                                    %         for tr = 1:nTrials
-                                    %             col_idx = t0_col_idx_per_sensor(i,tr,d_idx);
-                                    %             t0_i_hat(1,i,tr,d_idx) = t(col_idx);
-                                    % 
-                                    %             G_scalar = G_scalar_at_best(i,tr,d_idx);
-                                    %             c_scalar = c_scalar_at_best(i,tr,d_idx);
-                                    % 
-                                    %             alpha_i_hat(1,i,tr,d_idx) = c_scalar / (G_scalar * mi_val^2);
-                                    %             G_scalar_all(1,i,tr,d_idx) = G_scalar * mi_val^4;
-                                    %         end
-                                    %     end
-                                    % end
 
                                     %% --- Compute trimmed median estimates
                                     k_trim = floor(S/2)/2;
@@ -801,10 +644,6 @@ for experiment_idx = 1:numel(experiment_list)
                                         Q_sum = Q_sum + b_m.^2 .* Qn_m;
                                     end
 
-                                    % t0 search: column j of D_template is rho(t - t_j).
-                                    % [~, I]    = max(pagemtimes(v,    D_template)(:, offset_idx:end, :), [], 2);   % nTrials x 1 x D
-                                    % [~, I_bs] = max(pagemtimes(v_bs, D_template)(:, offset_idx:end, :), [], 2);
-
                                     mf_t0 = pagemtimes(v, D_template);       mf_t0_bs = pagemtimes(v_bs, D_template);
                                     [~, I]    = max(mf_t0(:, offset_idx:end, :),    [], 2);
                                     [~, I_bs] = max(mf_t0_bs(:, offset_idx:end, :), [], 2);
@@ -818,99 +657,6 @@ for experiment_idx = 1:numel(experiment_list)
                                     denom = dt*dt * sum(pagemtimes(Rss, Q_sum) .* Rss, 2);    % nTrials x 1 x D
                                     alpha_estimates    = reshape(dt*dt*sum(v    .* Rss, 2) ./ denom, 1, 1, nTrials, nDeployments);
                                     alpha_estimates_bs = reshape(dt*dt*sum(v_bs .* Rss, 2) ./ denom, 1, 1, nTrials, nDeployments);
-
-                                    % %% Nominal estimation using multiple receive antennas
-                                    % G_R = cat(2, real(g_sq), imag(g_sq));
-                                    % G_R = permute(G_R, [2,1,3]);
-                                    % 
-                                    % W_bcast = reshape(W, Mtot, Mtot, 1, nDeployments);  % broadcast over nTrials
-                                    % 
-                                    % z = pagemtimes(W_bcast, y_R);   % 2M x K x nTrials x nDeployments, decorrelated signal+noise
-                                    % z_bs = pagemtimes(W_bcast, y_R_bs);
-                                    % 
-                                    % mu = m.^2;
-                                    % WG_Rmu = reshape(pagemtimes(W, pagemtimes(G_R, reshape(mu, S, 1, nDeployments))), Mtot, nDeployments);  % Mtot x nDeployments
-                                    % 
-                                    % mf_with_z_sum = zeros(1, 1, K, nTrials, nDeployments);   % running z_chi(t0)
-                                    % num   = zeros(1,1,nTrials,nDeployments);
-                                    % denom = zeros(1,1,nTrials,nDeployments);
-                                    % Qn_matrix_all = cell(Mtot, 1);   % cache for reuse in alpha estimation
-                                    % 
-                                    % for m_idx = 1:Mtot
-                                    %     lambda_m = reshape(lambda_vals(m_idx,:), 1, 1, 1, nDeployments);
-                                    %     mag_sqr_H_m = Hm_arr(omega, lambda_m);
-                                    % 
-                                    %     [~, Qn_matrix_m] = get_time_domain(mag_sqr_H_m,dt,nDeployments);
-                                    %     resh_Qn_m_5d = reshape(Qn_matrix_m,K,K,1,1,nDeployments);
-                                    %     Qn_matrix_all{m_idx} = Qn_matrix_m;   % <-- cache it
-                                    % 
-                                    %     b_m = reshape(WG_Rmu(m_idx,:), 1, 1, 1, nDeployments);
-                                    %     Omega_m_t0_search = reshape(sum(b_m .* R00_t0_search,2), K, 1, K, 1, nDeployments);
-                                    % 
-                                    %     % Branch-m decorrelated observation z_m(t)
-                                    %     z_m = z(m_idx,:,:,:);
-                                    %     resh_z_m_5d = reshape(z_m, 1, K, 1, nTrials, nDeployments);
-                                    % 
-                                    %     % Accumulate z_chi(t0) and Gamma_chi(t0) contributions from branch m
-                                    %     mf_with_z_sum = mf_with_z_sum + dt*dt*pagemtimes(pagemtimes(resh_z_m_5d, resh_Qn_m_5d), Omega_m_t0_search);
-                                    % end
-                                    % 
-                                    % mf_with_z_sum_bs = zeros(1,1,K,nTrials,nDeployments);
-                                    % for m_idx = 1:Mtot
-                                    %     b_m = reshape(WG_Rmu(m_idx,:),1,1,1,nDeployments);
-                                    %     Omega_m_t0_search = reshape(sum(b_m .* R00_t0_search,2), K,1,K,1,nDeployments);
-                                    %     z_m_bs = reshape(z_bs(m_idx,:,:,:),1,K,1,nTrials,nDeployments);
-                                    %     mf_with_z_sum_bs = mf_with_z_sum_bs + dt*dt*pagemtimes(pagemtimes(z_m_bs, reshape(Qn_matrix_all{m_idx},K,K,1,1,nDeployments)), Omega_m_t0_search);
-                                    % end
-                                    % [~,I_bs] = max(mf_with_z_sum_bs(:,:,offset_idx:end,:,:),[],3);
-                                    % I_bs = I_bs + offset_idx - 1;
-                                    % t0_estimates_bs = reshape((I_bs-1)*dt,1,1,nTrials,nDeployments);
-                                    % 
-                                    % % Get time domain matrix for Qn.
-                                    % [max_y_vals,I] = max(mf_with_z_sum(:,:,offset_idx:end,:,:), [], 3);
-                                    % I = I + offset_idx - 1;
-                                    % t0_estimates_for_plot = reshape((I-1)*dt, 1, 1, nTrials, nDeployments);
-                                    % t0_estimates_for_alpha = t0_estimates_for_plot; % t0_true*ones(1,1,nTrials,nDeployments);
-                                    % 
-                                    % % Recompute the RAW (unweighted) pulse correlation at t0_estimates_for_alpha.
-                                    % % No mi weighting here -- mu = mi^2 is already folded into b_m via W*G_R*mu.
-                                    % Af = fft(sensor_signal(t-t0_estimates_for_alpha, Tp, norm_fact), N, 1);
-                                    % lag0 = round(Tp/dt);
-                                    % Y_tensor = dt*ifft(Af .* mfTemplateFFT_raw, [], 1);
-                                    % Rss_tensor = Y_tensor(lag0+1 : (lag0+K), :, :, :);   % K x 1 x nTrials x nDeployments
-                                    % 
-                                    % for m_idx = 1:Mtot
-                                    %     Qn_matrix_m = Qn_matrix_all{m_idx};
-                                    %     resh_Qn_m = reshape(Qn_matrix_m, K, K, 1, nDeployments);
-                                    % 
-                                    %     % Branch-m correlator kernel at the estimated t0: Omega_m(t0_hat) = b_m * Rss(t, t0_hat)
-                                    %     b_m = reshape(WG_Rmu(m_idx,:), 1, 1, 1, nDeployments);
-                                    %     Omega_m = sum(b_m .* Rss_tensor, 2);
-                                    %     resh_Omega_m = reshape(Omega_m, 1, K, nTrials, nDeployments);
-                                    % 
-                                    %     % Branch-m observation
-                                    %     z_m = z(m_idx,:,:,:);
-                                    % 
-                                    %     num_m   = dt*dt*pagemtimes(pagemtimes(z_m, resh_Qn_m), pagetranspose(resh_Omega_m));
-                                    %     denom_m = dt*dt*pagemtimes(pagemtimes(resh_Omega_m, resh_Qn_m), pagetranspose(resh_Omega_m));
-                                    % 
-                                    %     num   = num   + num_m;
-                                    %     denom = denom + denom_m;
-                                    % end
-                                    % alpha_estimates = num ./ denom;
-                                    % 
-                                    % num_bs = zeros(1,1,nTrials,nDeployments);
-                                    % denom_bs = num_bs;
-                                    % 
-                                    % for m_idx = 1:Mtot
-                                    %     b_m = reshape(WG_Rmu(m_idx,:),1,1,1,nDeployments);
-                                    %     resh_Omega_bs = reshape(b_m .* Rss_tensor,1,K,nTrials,nDeployments);
-                                    %     z_m_bs = z_bs(m_idx,:,:,:);
-                                    %     Qn_bc = reshape(Qn_matrix_all{m_idx},K,K,1,nDeployments);
-                                    %     num_bs = num_bs + dt*dt*pagemtimes(pagemtimes(z_m_bs,Qn_bc),pagetranspose(resh_Omega_bs));
-                                    %     denom_bs = denom_bs + dt*dt*pagemtimes(pagemtimes(resh_Omega_bs,Qn_bc),pagetranspose(resh_Omega_bs));
-                                    % end
-                                    % alpha_estimates_bs = num_bs ./ denom_bs;
 
                                     % --- Baseline: full S-sensor array, as if the attacker never
                                     % hijacked anyone
@@ -1024,32 +770,6 @@ for experiment_idx = 1:numel(experiment_list)
                                     rho_empirical_mse_bs(slot{:})         = alpha_t0_mse(alpha_estimates_bs,         t0_estimates_bs,         alpha_true, t0_true);
                                     rho_empirical_mse_trimmed(slot{:})    = alpha_t0_mse(alpha_estimates_trimmed,    t0_estimates_trimmed,    alpha_true, t0_true);
                                 end
-
-                                % % Compute empirical variance.
-                                % rho_empirical_var(strat_idx,agent_db_idx,channel_db_idx,1,scheme_idx,pivot_idx,save_dim,:) = var(alpha_estimates,0,3);
-                                % rho_empirical_var(strat_idx,agent_db_idx,channel_db_idx,2,scheme_idx,pivot_idx,save_dim,:) = var(t0_estimates_for_plot,0,3);
-                                % 
-                                % % Compute empirical mse.
-                                % rho_empirical_mse(strat_idx,agent_db_idx,channel_db_idx,1,scheme_idx,pivot_idx,save_dim,:) = mean((alpha_estimates - alpha_true).^2,3);
-                                % rho_empirical_mse(strat_idx,agent_db_idx,channel_db_idx,2,scheme_idx,pivot_idx,save_dim,:) = mean((t0_estimates_for_plot - t0_true).^2,3);
-                                % 
-                                % % Compute UNDEFENDED empirical mse -- only under attack, per request.
-                                % if attacker_enabled
-                                %     rho_empirical_mse_baseline(strat_idx,agent_db_idx,channel_db_idx,1,scheme_idx,pivot_idx,save_dim,:) = mean((alpha_estimates_baseline - alpha_true).^2,3);
-                                %     rho_empirical_mse_baseline(strat_idx,agent_db_idx,channel_db_idx,2,scheme_idx,pivot_idx,save_dim,:) = mean((t0_estimates_baseline - t0_true).^2,3);
-                                % 
-                                %     rho_empirical_mse_undefended(strat_idx,agent_db_idx,channel_db_idx,1,scheme_idx,pivot_idx,save_dim,:) = mean((alpha_estimates_undefended - alpha_true).^2,3);
-                                %     rho_empirical_mse_undefended(strat_idx,agent_db_idx,channel_db_idx,2,scheme_idx,pivot_idx,save_dim,:) = mean((t0_estimates_undefended - t0_true).^2,3);
-                                % 
-                                %     rho_empirical_mse_oracle(strat_idx,agent_db_idx,channel_db_idx,1,scheme_idx,pivot_idx,save_dim,:) = mean((alpha_estimates_oracle - alpha_true).^2,3);
-                                %     rho_empirical_mse_oracle(strat_idx,agent_db_idx,channel_db_idx,2,scheme_idx,pivot_idx,save_dim,:) = mean((t0_estimates_oracle - t0_true).^2,3);
-                                % 
-                                %     rho_empirical_mse_bs(strat_idx,agent_db_idx,channel_db_idx,1,scheme_idx,pivot_idx,save_dim,:) = mean((alpha_estimates_bs - alpha_true).^2,3);
-                                %     rho_empirical_mse_bs(strat_idx,agent_db_idx,channel_db_idx,2,scheme_idx,pivot_idx,save_dim,:) = mean((t0_estimates_bs - t0_true).^2,3);
-                                % 
-                                %     rho_empirical_mse_trimmed(strat_idx,agent_db_idx,channel_db_idx,1,scheme_idx,pivot_idx,save_dim,:) = mean((alpha_estimates_trimmed - alpha_true).^2,3);
-                                %     rho_empirical_mse_trimmed(strat_idx,agent_db_idx,channel_db_idx,2,scheme_idx,pivot_idx,save_dim,:) = mean((t0_estimates_trimmed - t0_true).^2,3);
-                                % end
 
                                 if use_W == false
                                     rho_crlb(strat_idx,agent_db_idx,channel_db_idx,1,scheme_idx,pivot_idx,save_dim,:) = alpha_objective_array(1, mi_4d, ci);
