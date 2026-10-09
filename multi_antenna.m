@@ -49,7 +49,11 @@ Ps = integral(func,0,T0)/T0;
 
 % Define true parameter values.
 alpha_true = 3;
-t0_true = 1.5;
+t0_true = 1.6;
+
+% Estimation mode: false = joint (alpha evaluated at the estimated t0),
+%                  true  = alpha evaluated at the true t0.
+alpha_uses_true_t0 = false;
 
 % Set the number of antennas
 num_antennas = 9;
@@ -63,10 +67,6 @@ all_w = randn(K,S_max,1,nTrials,nDeployments);
 n = (randn(K,1,num_antennas,nTrials,nDeployments) + 1i*randn(K,1,num_antennas,nTrials,nDeployments));
 % Generate channel gains.
 all_gi = (randn(1,S_max,num_antennas,1,nDeployments) + 1i*randn(1,S_max,num_antennas,1,nDeployments))/sqrt(2);
-
-% Define range for distribution of mi and ti (tau_i)
-% max_mi = 1;
-% min_mi = 0.5;
 
 %% Generate mi and ti
 max_ti = 1;
@@ -104,6 +104,12 @@ if t0_true > t0_max
     error("True value of t0 exceeds maximum!")
 end
 
+% Keep event timing on the sample grid (avoids a t0-MSE floor of ~(dt/2)^2
+% and interpolated time-shift attacks).
+on_grid = @(x) abs(x/dt - round(x/dt)) < 1e-9;
+assert(on_grid(t0_true), 't0_true = %g is not a multiple of dt = %g', t0_true, dt);
+assert(on_grid(Tp),      'Tp = %g is not a multiple of dt = %g', Tp, dt);
+
 %% Byzantine attacker configuration
 attacker_enabled = true;
 attacker_idx     = [4,5,6]; % [2,4]      % sensor index/indices (within 1:S) that are compromised
@@ -123,14 +129,6 @@ D_template = reshape(R00_full(:,:,:,1), K, K);   % K x K, [D_template]_{k,l} = r
 sv_energy = cumsum(diag(Sigma_D).^2) / sum(diag(Sigma_D).^2);
 d_sub = find(sv_energy >= 0.999, 1, 'first');
 Phi = U_D(:, 1:d_sub);           % K x d_sub: honest-signal subspace
-Psi = U_D(:, d_sub+1:end);       % K x (K-d_sub): its orthogonal complement -- free byproduct of the same SVD
-
-% Discretized autocorrelation restricted to Psi-coordinates
-Rss_Psi = Psi.' * D_template * Psi;   % (K-d_sub) x (K-d_sub)
-
-% Eigendecompose Rss_Psi
-[V_Rss, Lam_Rss] = eig((Rss_Psi+Rss_Psi.')/2);
-lam_Rss = diag(Lam_Rss);   % (K-d_sub) x 1
 
 % Eigenvalues of D_template itself (already computed via U_D/Sigma_D above)
 lam_D = diag(Sigma_D);   % K x 1
@@ -166,8 +164,8 @@ for experiment_idx = 1:numel(experiment_list)
     log_msg(verbosity_level, 1, '%s', msg);
 
     % Configure strategies
-    agent_db_values = 5;
-    channel_snr = linspace(0,20,3);
+    agent_db_values = 0;
+    channel_snr = linspace(0,10,5);
 
     % "noise" | "sawtooth" | "sinusoid" | "peak" | "flip" | "time shift" | "amplitude scale"
     attacks = ["noise"];
@@ -326,6 +324,7 @@ for experiment_idx = 1:numel(experiment_list)
                                 ui(:,atk,:,:,:) = attacker_beta * ui(:,atk,:,:,:);
                             case "time shift"        % shifted copy, truncated to [0, T0]
                                 t0_attacker = 3;
+                                assert(abs((t0_attacker - t0_true)/dt - round((t0_attacker - t0_true)/dt)) < 1e-9, 'time shift is not a multiple of dt');
                                 ui(:,atk,:,:,:) = shift_waveform(ui(:,atk,:,:,:), t, t0_attacker - t0_true);
                             otherwise
                                 ui(:,atk,:,:,:) = scaled_attacker_noise(:,atk,:,:,:);
@@ -424,7 +423,7 @@ for experiment_idx = 1:numel(experiment_list)
                             Nw_over_2 = scaled_w_psd_constant;   % == Nw/2
                             N0_over_2 = scaled_n_psd_constant / (2*dt);   % == N0/2
                             
-                            Ki_diag_all = cell(S,1);
+                            % Ki_diag_all = cell(S,1);
                             Ki_full_eig = cell(S,1);
                             for i = 1:S
                                 a_i = reshape(mi_5d(1,i,1,1,:).^2 * Nw_over_2, 1, nDeployments);
@@ -434,7 +433,7 @@ for experiment_idx = 1:numel(experiment_list)
                                 end
                                 b_i = N0_over_2 ./ norm_sq_i;
 
-                                Ki_diag_all{i} = 1 ./ (lam_Rss .* a_i + b_i);   % (K-d_sub) x nDeployments
+                                % Ki_diag_all{i} = 1 ./ (lam_Rss .* a_i + b_i);   % (K-d_sub) x nDeployments
                                 Ki_full_eig{i} = lam_D .* a_i + b_i;            % K x nDeployments (eigenVALUES, not inverted -- see usage below)
                             end
 
@@ -467,7 +466,7 @@ for experiment_idx = 1:numel(experiment_list)
 
                                     t0_estimates_for_plot = reshape((I-1)*dt, 1, 1, nTrials, nDeployments);
     
-                                    if contains(experiment, "disjoint")
+                                    if alpha_uses_true_t0
                                         t0_estimates_for_alpha = t0_true*ones(1,1,nTrials,nDeployments);
                                     else
                                         t0_estimates_for_alpha = t0_estimates_for_plot;
@@ -592,11 +591,11 @@ for experiment_idx = 1:numel(experiment_list)
                                     alpha_i_hat = reshape(c_scalar_at_best ./ (G_scalar_at_best .* mi_sq), 1, S, nTrials, nDeployments);
 
                                     %% --- Compute trimmed median estimates
-                                    k_trim = floor(S/2)/2;
+                                    k_trim = floor(S/4);
                                     sorted_alpha = sort(alpha_i_hat, 2);
                                     sorted_t0 = sort(t0_i_hat, 2);
-                                    alpha_estimates_trimmed = median(sorted_alpha(1,k_trim+1:end-k_trim,:,:), 2);
-                                    t0_estimates_trimmed = median(sorted_t0(1,k_trim+1:end-k_trim,:,:), 2);
+                                    alpha_estimates_trimmed = median(sorted_alpha, 2); % median(sorted_alpha(1,k_trim+1:end-k_trim,:,:), 2);
+                                    t0_estimates_trimmed = median(sorted_t0, 2); % median(sorted_t0(1,k_trim+1:end-k_trim,:,:), 2);
 
                                     %% --- MAD Test
                                     med_alpha = median(alpha_i_hat, 2);   % 1 x S x nTrials x nDeployments
@@ -604,9 +603,10 @@ for experiment_idx = 1:numel(experiment_list)
                                     med_t0 = median(t0_i_hat, 2);
                                     mad_t0 = mad(t0_i_hat, 1, 2);
 
-                                    alpha_tol = alpha_true * 0.1;
-                                    t0_tol = t0_true * 0.1;
-                                    t0_idx_tol = ceil(t0_true * 0.1/dt);
+                                    tol_pct = 0.15;
+                                    alpha_tol = alpha_true * tol_pct;
+                                    t0_tol = t0_true * tol_pct;
+                                    t0_idx_tol = ceil(t0_true * tol_pct/dt);
                                     
                                     %%% With alpha
                                     alpha_delta_k = 5;
@@ -652,11 +652,26 @@ for experiment_idx = 1:numel(experiment_list)
                                     t0_estimates_for_plot = reshape(t(t0_col),                 1, 1, nTrials, nDeployments);
                                     t0_estimates_bs       = reshape(t(I_bs + offset_idx - 1),  1, 1, nTrials, nDeployments);
 
-                                    % Alpha: t0_hat is on the grid, so Rss(t, t0_hat) is a column of D_template (no FFT).
-                                    Rss = permute(reshape(D_template(:, t0_col(:)), K, nTrials, nDeployments), [2 1 3]);   % nTrials x K x D
-                                    denom = dt*dt * sum(pagemtimes(Rss, Q_sum) .* Rss, 2);    % nTrials x 1 x D
-                                    alpha_estimates    = reshape(dt*dt*sum(v    .* Rss, 2) ./ denom, 1, 1, nTrials, nDeployments);
-                                    alpha_estimates_bs = reshape(dt*dt*sum(v_bs .* Rss, 2) ./ denom, 1, 1, nTrials, nDeployments);
+                                    % Alpha given t0. Joint (default): each estimator's own t0_hat, which lies on the
+                                    % grid, so rho(t - t0_hat) is a column of D_template. Otherwise: the true t0.
+                                    if alpha_uses_true_t0
+                                        Y_true = dt*ifft(fft(sensor_signal(t - t0_true, Tp, norm_fact), N, 1) .* mfTemplateFFT_raw);
+                                        Rss    = repmat(Y_true(round(Tp/dt)+1 : round(Tp/dt)+K).', nTrials, 1, nDeployments);   % nTrials x K x D
+                                        Rss_bs = Rss;
+                                    else
+                                        Rss    = permute(reshape(D_template(:, t0_col(:)),                K, nTrials, nDeployments), [2 1 3]);
+                                        Rss_bs = permute(reshape(D_template(:, I_bs(:) + offset_idx - 1), K, nTrials, nDeployments), [2 1 3]);
+                                    end
+                                    denom    = dt*dt * sum(pagemtimes(Rss,    Q_sum) .* Rss,    2);   % nTrials x 1 x D
+                                    denom_bs = dt*dt * sum(pagemtimes(Rss_bs, Q_sum) .* Rss_bs, 2);
+                                    alpha_estimates    = reshape(dt*dt*sum(v    .* Rss,    2) ./ denom,    1, 1, nTrials, nDeployments);
+                                    alpha_estimates_bs = reshape(dt*dt*sum(v_bs .* Rss_bs, 2) ./ denom_bs, 1, 1, nTrials, nDeployments);
+
+                                    % % Alpha: t0_hat is on the grid, so Rss(t, t0_hat) is a column of D_template (no FFT).
+                                    % Rss = permute(reshape(D_template(:, t0_col(:)), K, nTrials, nDeployments), [2 1 3]);   % nTrials x K x D
+                                    % denom = dt*dt * sum(pagemtimes(Rss, Q_sum) .* Rss, 2);    % nTrials x 1 x D
+                                    % alpha_estimates    = reshape(dt*dt*sum(v    .* Rss, 2) ./ denom, 1, 1, nTrials, nDeployments);
+                                    % alpha_estimates_bs = reshape(dt*dt*sum(v_bs .* Rss, 2) ./ denom, 1, 1, nTrials, nDeployments);
 
                                     % --- Baseline: full S-sensor array, as if the attacker never
                                     % hijacked anyone
@@ -665,7 +680,7 @@ for experiment_idx = 1:numel(experiment_list)
                                     for d_idx = 1:nDeployments
                                         geom_baseline = build_null_geometry([], mi_5d, g_tilde, gamma_w, gamma_n, Hm_arr, omega, dt, K, S, d_idx);
                                         [alpha_b, t0_b, ~] = estimate_with_geometry(geom_baseline, y_no_attack, K, N, Tp, ...
-                                            norm_fact, t, t0_true, mfTemplateFFT_raw, D_template, 1:nTrials, d_idx, dt);
+                                            norm_fact, t, t0_true, mfTemplateFFT_raw, D_template, 1:nTrials, d_idx, dt, offset_idx, alpha_uses_true_t0);
                                         alpha_estimates_baseline(1,1,:,d_idx) = alpha_b;
                                         t0_estimates_baseline(1,1,:,d_idx) = t0_b;
                                     end
@@ -695,7 +710,7 @@ for experiment_idx = 1:numel(experiment_list)
                                         for d_idx = 1:nDeployments
                                             geom_oracle = build_null_geometry(attacker_idx, mi_5d, g_tilde, gamma_w, gamma_n, Hm_arr, omega, dt, K, S, d_idx);
                                             [alpha_o, t0_o, ~] = estimate_with_geometry(geom_oracle, y, K, N, Tp, ...
-                                                norm_fact, t, t0_true, mfTemplateFFT_raw, D_template, 1:nTrials, d_idx, dt);
+                                                norm_fact, t, t0_true, mfTemplateFFT_raw, D_template, 1:nTrials, d_idx, dt, offset_idx, alpha_uses_true_t0);
                                             alpha_estimates_oracle(1,1,:,d_idx) = alpha_o;
                                             t0_estimates_oracle(1,1,:,d_idx) = t0_o;
                                         end
@@ -713,26 +728,25 @@ for experiment_idx = 1:numel(experiment_list)
                                     for d_idx = 1:nDeployments
                                         [unique_sets, group_idx] = unique_cell_sets(excluded_sets(:,d_idx));
 
-                                        for g = 1:numel(unique_sets)
-                                            A = unique_sets{g};
+                                        for grp = 1:numel(unique_sets)
+                                            A = unique_sets{grp};
+                                            trial_members = find(group_idx == grp);
+                                            n_members = numel(trial_members);
+
+                                            % Count detection outcomes for every group, including "nothing flagged".
+                                            tp_total = tp_total + numel(intersect(A, attacker_idx)) * n_members;
+                                            fp_total = fp_total + numel(setdiff(A, attacker_idx))   * n_members;
+                                            fn_total = fn_total + numel(setdiff(attacker_idx, A))   * n_members;
+
                                             if isempty(A)
                                                 continue   % nothing flagged -- keep undefended estimate
                                             end
-
-                                            trial_members = find(group_idx == g);
 
                                             geom = build_null_geometry(A, mi_5d, g_tilde, gamma_w, gamma_n, Hm_arr, omega, dt, K, S, d_idx);
                                             num_geometries_built = num_geometries_built + 1;
 
                                             [alpha_A, t0_A, ~] = estimate_with_geometry(geom, y, K, N, Tp, ...
-                                                norm_fact, t, t0_true, mfTemplateFFT_raw, D_template, trial_members, d_idx, dt);
-
-                                            true_positive  = numel(intersect(A, attacker_idx));
-                                            false_positive = numel(setdiff(A, attacker_idx));
-                                            false_negative = numel(setdiff(attacker_idx, A));
-                                            tp_total = tp_total + true_positive * numel(trial_members);
-                                            fp_total = fp_total + false_positive * numel(trial_members);
-                                            fn_total = fn_total + false_negative * numel(trial_members);
+                                                norm_fact, t, t0_true, mfTemplateFFT_raw, D_template, trial_members, d_idx, dt, offset_idx, alpha_uses_true_t0);
 
                                             alpha_final(1,1,trial_members,d_idx) = alpha_A;
                                             t0_final(1,1,trial_members,d_idx) = t0_A;
@@ -841,8 +855,8 @@ for experiment_idx = 1:numel(experiment_list)
     files_to_save = ["avg_dep_mse_" + txt_list, "avg_dep_var", "avg_dep_mse", "avg_dep_bias", "avg_dep_crlb", "avg_dep_crlb_oracle",...
         "agent_db_values", "channel_snr", "selected_schemes", "dropout_vals", "sensor_vals", "channel_db_values",...
         "experiment", "sensor_dimension", "save_images", "K", "nDeployments", "constraints", "transforms", "coeff_types", "approaches",...
-        "iter_arr", "iter_length", "all_strats", "num_strats", "save_images",...
-        "T0", "Tp", "alpha_true", "t0_true", "pivot_vals", "Mtot", "N", "S", "S_max","attacks"];
+        "iter_arr", "iter_length", "all_strats", "num_strats", "save_images", "alpha_uses_true_t0",...
+        "T0", "Tp", "alpha_true", "t0_true", "pivot_vals", "Mtot", "N", "S", "S_max","attacks", "attacker_enabled"];
     
     save(experiment + "_results.mat", files_to_save{:})
     

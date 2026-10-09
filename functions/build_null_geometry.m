@@ -26,12 +26,6 @@ Dmat_ret = diag(m_ret.^2 * gamma_w);
 B_A = breve_g_ret * Dmat_ret * breve_g_ret.';
 B_A = (B_A + B_A.')/2;
 
-% [U_A, Lam_A] = eig(B_A/gamma_n);
-% [lam_sorted, idx] = sort(diag(Lam_A), 'descend');
-% U_A = U_A(:,idx);
-% lambda_vals_A = lam_sorted;
-% W_A = (1/sqrt(gamma_n)) * U_A.';
-
 % Same scaling as the main script: server noise is gamma_n/2 per real dimension.
 [U_A, Lam_A] = eig(B_A);
 [lam_sorted, idx] = sort(diag(Lam_A), 'descend');
