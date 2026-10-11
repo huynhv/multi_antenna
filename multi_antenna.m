@@ -205,16 +205,16 @@ for experiment_idx = 1:numel(experiment_list)
     channel_db_values = repmat(channel_snr, length(selected_schemes), 1, length(agent_db_values));
     
     % Initialize empty performance metric matrices
-    rho_crlb = zeros(num_strats,length(agent_db_values),size(channel_db_values,2),2,length(selected_schemes),numel(pivot_vals),sensor_dimension,nDeployments);
+    rho_crlb = zeros(num_strats,numel(agent_db_values),numel(channel_db_values),2,numel(selected_schemes),numel(pivot_vals),sensor_dimension,nDeployments);
     rho_crlb_oracle = rho_crlb;   % Theoretical CRLB with the attacker's channel treated as absent -- upper bound, only under attack
     
     rho_empirical_bias = rho_crlb;
     rho_empirical_var = rho_crlb;
     rho_empirical_mse = rho_crlb;
-    rho_empirical_mse_baseline = rho_crlb;   % Full S-sensor array, attacker never hijacked anyone -- "what if there had been no attack at all"
+    rho_empirical_mse_full_honest = rho_crlb;   % Full S-sensor array, attacker never hijacked anyone -- "what if there had been no attack at all"
     rho_empirical_mse_undefended = rho_crlb;   % MSE with NO defense applied -- only meaningful/populated under attack
     rho_empirical_mse_oracle = rho_crlb;   % MSE with attacker PERFECTLY, freely removed -- upper bound, only under attack
-    rho_empirical_mse_bs = rho_crlb;
+    rho_empirical_mse_basis_supp = rho_crlb;
     rho_empirical_mse_trimmed = rho_crlb;
 
     % Start run timer
@@ -437,19 +437,19 @@ for experiment_idx = 1:numel(experiment_list)
                                 Ki_full_eig{i} = lam_D .* a_i + b_i;            % K x nDeployments (eigenVALUES, not inverted -- see usage below)
                             end
 
+                            y = pagetranspose(out_cws + scaled_n);
+                            y_no_attack = pagetranspose(out_cws_no_attack + scaled_n);   % SAME noise draw, only the attacked sensor's content differs
+                            
                             %%%%%%%%%%%%%%%%% ESTIMATION %%%%%%%%%%%%%%%%%
                             total_est_start = tic;
-    
                             log_msg(verbosity_level, 3, 'Begin ML estimation');
+
                             for strat_idx = 1:num_strats
                                 strat = all_strats(strat_idx);
                                 log_msg(verbosity_level, 4, 'Running ML estimation for %s', strat);
         
                                 ai = 1;
                                 bi = 0;
-
-                                y = pagetranspose(out_cws + scaled_n);
-                                y_no_attack = pagetranspose(out_cws_no_attack + scaled_n);   % SAME noise draw, only the attacked sensor's content differs
 
                                 %%% Baseline single-antenna case from previous manuscripts
                                 if use_W == false
@@ -504,7 +504,7 @@ for experiment_idx = 1:numel(experiment_list)
                                     y_R = cat(2, real(y_sq), imag(y_sq));   % K x 2M x nTrials x nDeployments
                                     y_R = permute(y_R, [2 1 3 4]);   % 2M x K x nTrials x nDeployments
 
-                                    y_R_bs = pagemtimes(pagemtimes(y_R, Phi), Phi.');   % project onto honest subspace, same K dims
+                                    % y_R_basis_supp = pagemtimes(pagemtimes(y_R, Phi), Phi.');   % project onto honest subspace, same K dims
 
                                     % --- Null-space isolation: recover each sensor's own
                                     % contribution, including the attacker's, on the RAW
@@ -525,13 +525,6 @@ for experiment_idx = 1:numel(experiment_list)
                                     % honest_idx = setdiff(1:S, attacker_idx);
                                     
                                     %% --- Practical hat_t0 for the sign-flip check: robust
-                                    % version. (1) EXCLUDES sensors already flagged by T_i
-                                    % corr_per_sensor = dt * pagemtimes(D_template.', reshape(hat_u_all, K, S*nTrials*nDeployments));   % K x (S*nTrials*nDeployments)
-                                    % [~, best_col_per_sensor] = max(corr_per_sensor(offset_idx:end,:), [], 1);
-                                    % 
-                                    % best_col_per_sensor = best_col_per_sensor + offset_idx - 1;
-                                    % t0_col_idx_per_sensor = reshape(best_col_per_sensor, S, nTrials, nDeployments) - 1;   % per-sensor delay guess
-
                                     t0_col_idx_per_sensor = zeros(S, nTrials, nDeployments);
                                     c_scalar_at_best = zeros(S, nTrials, nDeployments);   % cache c_i(tau_hat) for reuse below
                                     G_scalar_at_best = zeros(S, nTrials, nDeployments);   % cache G_i(tau_hat) for reuse below
@@ -626,13 +619,13 @@ for experiment_idx = 1:numel(experiment_list)
                                     % Q_sum = sum_m b_m^2*Qn_m once and get every estimate from those.
                                     W_bcast = reshape(W, Mtot, Mtot, 1, nDeployments);
                                     z    = pagemtimes(W_bcast, y_R);      % 2M x K x nTrials x nDeployments
-                                    z_bs = pagemtimes(W_bcast, y_R_bs);
+                                    % z_basis_supp = pagemtimes(W_bcast, y_R_basis_supp);
 
                                     mu = m.^2;
                                     WG_Rmu = reshape(pagemtimes(W, pagemtimes(G_R, reshape(mu, S, 1, nDeployments))), Mtot, nDeployments);
 
                                     v     = zeros(nTrials, K, nDeployments);
-                                    v_bs  = zeros(nTrials, K, nDeployments);
+                                    % v_basis_supp  = zeros(nTrials, K, nDeployments);
                                     Q_sum = zeros(K, K, nDeployments);
                                     for m_idx = 1:Mtot
                                         lambda_m = reshape(lambda_vals(m_idx,:), 1, 1, 1, nDeployments);
@@ -640,49 +633,44 @@ for experiment_idx = 1:numel(experiment_list)
                                         b_m = reshape(WG_Rmu(m_idx,:), 1, 1, nDeployments);
 
                                         v     = v     + b_m .* pagemtimes(permute(z(m_idx,:,:,:),    [3 2 4 1]), Qn_m);
-                                        v_bs  = v_bs  + b_m .* pagemtimes(permute(z_bs(m_idx,:,:,:), [3 2 4 1]), Qn_m);
+                                        % v_basis_supp  = v_basis_supp  + b_m .* pagemtimes(permute(z_basis_supp(m_idx,:,:,:), [3 2 4 1]), Qn_m);
                                         Q_sum = Q_sum + b_m.^2 .* Qn_m;
                                     end
 
-                                    mf_t0 = pagemtimes(v, D_template);       mf_t0_bs = pagemtimes(v_bs, D_template);
+                                    mf_t0 = pagemtimes(v, D_template);
+                                    % mf_t0_basis_supp = pagemtimes(v_basis_supp, D_template);
                                     [~, I]    = max(mf_t0(:, offset_idx:end, :),    [], 2);
-                                    [~, I_bs] = max(mf_t0_bs(:, offset_idx:end, :), [], 2);
+                                    % [~, I_basis_supp] = max(mf_t0_basis_supp(:, offset_idx:end, :), [], 2);
 
                                     t0_col    = I    + offset_idx - 1;
                                     t0_estimates_for_plot = reshape(t(t0_col),                 1, 1, nTrials, nDeployments);
-                                    t0_estimates_bs       = reshape(t(I_bs + offset_idx - 1),  1, 1, nTrials, nDeployments);
+                                    % t0_estimates_basis_supp       = reshape(t(I_basis_supp + offset_idx - 1),  1, 1, nTrials, nDeployments);
 
                                     % Alpha given t0. Joint (default): each estimator's own t0_hat, which lies on the
                                     % grid, so rho(t - t0_hat) is a column of D_template. Otherwise: the true t0.
                                     if alpha_uses_true_t0
                                         Y_true = dt*ifft(fft(sensor_signal(t - t0_true, Tp, norm_fact), N, 1) .* mfTemplateFFT_raw);
                                         Rss    = repmat(Y_true(round(Tp/dt)+1 : round(Tp/dt)+K).', nTrials, 1, nDeployments);   % nTrials x K x D
-                                        Rss_bs = Rss;
+                                        % Rss_basis_supp = Rss;
                                     else
                                         Rss    = permute(reshape(D_template(:, t0_col(:)),                K, nTrials, nDeployments), [2 1 3]);
-                                        Rss_bs = permute(reshape(D_template(:, I_bs(:) + offset_idx - 1), K, nTrials, nDeployments), [2 1 3]);
+                                        % Rss_basis_supp = permute(reshape(D_template(:, I_basis_supp(:) + offset_idx - 1), K, nTrials, nDeployments), [2 1 3]);
                                     end
                                     denom    = dt*dt * sum(pagemtimes(Rss,    Q_sum) .* Rss,    2);   % nTrials x 1 x D
-                                    denom_bs = dt*dt * sum(pagemtimes(Rss_bs, Q_sum) .* Rss_bs, 2);
+                                    % denom_basis_supp = dt*dt * sum(pagemtimes(Rss_basis_supp, Q_sum) .* Rss_basis_supp, 2);
                                     alpha_estimates    = reshape(dt*dt*sum(v    .* Rss,    2) ./ denom,    1, 1, nTrials, nDeployments);
-                                    alpha_estimates_bs = reshape(dt*dt*sum(v_bs .* Rss_bs, 2) ./ denom_bs, 1, 1, nTrials, nDeployments);
-
-                                    % % Alpha: t0_hat is on the grid, so Rss(t, t0_hat) is a column of D_template (no FFT).
-                                    % Rss = permute(reshape(D_template(:, t0_col(:)), K, nTrials, nDeployments), [2 1 3]);   % nTrials x K x D
-                                    % denom = dt*dt * sum(pagemtimes(Rss, Q_sum) .* Rss, 2);    % nTrials x 1 x D
-                                    % alpha_estimates    = reshape(dt*dt*sum(v    .* Rss, 2) ./ denom, 1, 1, nTrials, nDeployments);
-                                    % alpha_estimates_bs = reshape(dt*dt*sum(v_bs .* Rss, 2) ./ denom, 1, 1, nTrials, nDeployments);
+                                    % alpha_estimates_basis_supp = reshape(dt*dt*sum(v_basis_supp .* Rss_basis_supp, 2) ./ denom_basis_supp, 1, 1, nTrials, nDeployments);
 
                                     % --- Baseline: full S-sensor array, as if the attacker never
                                     % hijacked anyone
-                                    alpha_estimates_baseline = zeros(size(alpha_estimates));
-                                    t0_estimates_baseline    = zeros(size(t0_estimates_for_plot));
+                                    alpha_estimates_full_honest = zeros(size(alpha_estimates));
+                                    t0_estimates_full_honest    = zeros(size(t0_estimates_for_plot));
                                     for d_idx = 1:nDeployments
-                                        geom_baseline = build_null_geometry([], mi_5d, g_tilde, gamma_w, gamma_n, Hm_arr, omega, dt, K, S, d_idx);
-                                        [alpha_b, t0_b, ~] = estimate_with_geometry(geom_baseline, y_no_attack, K, N, Tp, ...
+                                        geom_full_honest = build_null_geometry([], mi_5d, g_tilde, gamma_w, gamma_n, Hm_arr, omega, dt, K, S, d_idx);
+                                        [alpha_b, t0_b, ~] = estimate_with_geometry(geom_full_honest, y_no_attack, K, N, Tp, ...
                                             norm_fact, t, t0_true, mfTemplateFFT_raw, D_template, 1:nTrials, d_idx, dt, offset_idx, alpha_uses_true_t0);
-                                        alpha_estimates_baseline(1,1,:,d_idx) = alpha_b;
-                                        t0_estimates_baseline(1,1,:,d_idx) = t0_b;
+                                        alpha_estimates_full_honest(1,1,:,d_idx) = alpha_b;
+                                        t0_estimates_full_honest(1,1,:,d_idx) = t0_b;
                                     end
 
                                     % Per-trial flagged sensor SET (face value -- no validation).
@@ -719,7 +707,7 @@ for experiment_idx = 1:numel(experiment_list)
                                     alpha_final = alpha_estimates;
                                     t0_final = t0_estimates_for_plot;
 
-                                    % --- Face value validation
+                                    %% --- Face value validation
                                     num_geometries_built = 0;
                                     tp_total = 0;
                                     fp_total = 0;
@@ -778,10 +766,10 @@ for experiment_idx = 1:numel(experiment_list)
                                 rho_empirical_mse(slot{:}) = alpha_t0_mse(alpha_estimates, t0_estimates_for_plot, alpha_true, t0_true);
 
                                 if attacker_enabled && use_W
-                                    rho_empirical_mse_baseline(slot{:})   = alpha_t0_mse(alpha_estimates_baseline,   t0_estimates_baseline,   alpha_true, t0_true);
+                                    rho_empirical_mse_full_honest(slot{:})   = alpha_t0_mse(alpha_estimates_full_honest,   t0_estimates_full_honest,   alpha_true, t0_true);
                                     rho_empirical_mse_undefended(slot{:}) = alpha_t0_mse(alpha_estimates_undefended, t0_estimates_undefended, alpha_true, t0_true);
                                     rho_empirical_mse_oracle(slot{:})     = alpha_t0_mse(alpha_estimates_oracle,     t0_estimates_oracle,     alpha_true, t0_true);
-                                    rho_empirical_mse_bs(slot{:})         = alpha_t0_mse(alpha_estimates_bs,         t0_estimates_bs,         alpha_true, t0_true);
+                                    % rho_empirical_mse_basis_supp(slot{:})         = alpha_t0_mse(alpha_estimates_basis_supp,         t0_estimates_basis_supp,         alpha_true, t0_true);
                                     rho_empirical_mse_trimmed(slot{:})    = alpha_t0_mse(alpha_estimates_trimmed,    t0_estimates_trimmed,    alpha_true, t0_true);
                                 end
 
@@ -832,9 +820,9 @@ for experiment_idx = 1:numel(experiment_list)
         avg_dep_bias = rho_empirical_bias;
         avg_dep_mse_undefended = rho_empirical_mse_undefended;
         avg_dep_mse_oracle = rho_empirical_mse_oracle;   % (or mean(...) branch, matching the existing if/else)
-        avg_dep_mse_baseline = rho_empirical_mse_baseline;
+        avg_dep_mse_full_honest = rho_empirical_mse_full_honest;
         avg_dep_mse_trimmed = rho_empirical_mse_trimmed;
-        avg_dep_mse_bs = rho_empirical_mse_bs;
+        % avg_dep_mse_basis_supp = rho_empirical_mse_basis_supp;
         avg_dep_crlb_oracle = rho_crlb_oracle;
     else
         avg_dep_var = mean(rho_empirical_var,length(size(rho_empirical_var)));
@@ -843,13 +831,13 @@ for experiment_idx = 1:numel(experiment_list)
         avg_dep_bias = mean(rho_empirical_bias,length(size(rho_empirical_bias)));
         avg_dep_mse_undefended = mean(rho_empirical_mse_undefended,length(size(rho_empirical_mse_undefended)));
         avg_dep_mse_oracle = mean(rho_empirical_mse_oracle,length(size(rho_empirical_mse_oracle)));   % (or mean(...) branch, matching the existing if/else)
-        avg_dep_mse_baseline = mean(rho_empirical_mse_baseline,length(size(rho_empirical_mse_baseline)));
+        avg_dep_mse_full_honest = mean(rho_empirical_mse_full_honest,length(size(rho_empirical_mse_full_honest)));
         avg_dep_mse_trimmed = mean(rho_empirical_mse_trimmed,length(size(rho_empirical_mse_trimmed)));
-        avg_dep_mse_bs = mean(rho_empirical_mse_bs,length(size(rho_empirical_mse_bs)));
+        % avg_dep_mse_basis_supp = mean(rho_empirical_mse_basis_supp,length(size(rho_empirical_mse_basis_supp)));
         avg_dep_crlb_oracle = mean(rho_crlb_oracle,length(size(rho_crlb_oracle)));
     end
 
-    txt_list = ["undefended", "oracle", "baseline", "trimmed", "bs"];
+    txt_list = ["undefended", "oracle", "full_honest", "trimmed"]; % , "basis_supp"];
     save_images = false;
 
     files_to_save = ["avg_dep_mse_" + txt_list, "avg_dep_var", "avg_dep_mse", "avg_dep_bias", "avg_dep_crlb", "avg_dep_crlb_oracle",...
