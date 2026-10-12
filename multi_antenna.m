@@ -13,7 +13,7 @@ rng(seed);
 
 use_W = true;
 
-nDeployments = 10;
+nDeployments = 100;
 % Set the number of measurements per sensor, starting from 0
 K = 301;
 % Set number of trials.
@@ -21,7 +21,6 @@ nTrials = 500;
 
 % Set number of sensors
 sensor_vals = 9; % [5,10]
-dropout_vals = 0;
 sensor_dimension = length(sensor_vals);
 
 % Set observation window length in seconds.
@@ -49,7 +48,7 @@ Ps = integral(func,0,T0)/T0;
 
 % Define true parameter values.
 alpha_true = 3;
-t0_true = 1.6;
+t0_true = dt*ceil(1.5/dt);
 
 % Estimation mode: false = joint (alpha evaluated at the estimated t0),
 %                  true  = alpha evaluated at the true t0.
@@ -72,13 +71,13 @@ all_gi = (randn(1,S_max,num_antennas,1,nDeployments) + 1i*randn(1,S_max,num_ante
 max_ti = 1;
 min_ti = 0.8; 
 path_loss_exp = 0.5;
-shadow_sigma_dB = 0.2;
+shadow_sigma_dB = 0.1;
 
 m_ref = 1;              % reference amplitude at distance min_ti
 c_gain = m_ref * min_ti^path_loss_exp;   % anchors: unshadowed mi = m_ref at d = min_ti
 
 all_di = sort(unifrnd(min_ti, max_ti, 1, S_max, 1, 1, nDeployments), 2, 'ascend');
-all_ti = all_di;   % v = 1, per earlier discussion
+% all_ti = all_di;   % v = 1, per earlier discussion
 
 shadowing = 10.^(shadow_sigma_dB/20 * randn(1,S_max,1,1,nDeployments));
 all_mi = c_gain ./ (all_di.^path_loss_exp) .* shadowing;
@@ -131,7 +130,7 @@ D_template = reshape(R00_full(:,:,:,1), K, K);   % K x K, [D_template]_{k,l} = r
 [U_D, Sigma_D, ~] = svd(D_template, 'econ');
 sv_energy = cumsum(diag(Sigma_D).^2) / sum(diag(Sigma_D).^2);
 d_sub = find(sv_energy >= 0.999, 1, 'first');
-Phi = U_D(:, 1:d_sub);           % K x d_sub: honest-signal subspace
+% Phi = U_D(:, 1:d_sub);           % K x d_sub: honest-signal subspace
 
 % Eigenvalues of D_template itself (already computed via U_D/Sigma_D above)
 lam_D = diag(Sigma_D);   % K x 1
@@ -172,9 +171,9 @@ for experiment_idx = 1:numel(experiment_list)
 
     
     % Attacks to test -- each runs the full Monte Carlo sweep. Valid names are listed below.
-    attacks = ["noise"];
+    attacks = ["noise", "sinusoid", "peak", "flip", "time shift"];
 
-    valid_attacks = ["noise", "sinusoid", "peak", "flip", "time shift", "amplitude scale"];
+    valid_attacks = ["noise", "sinusoid", "peak", "flip", "time shift"];
     attacks = unique(attacks, 'stable');   % no duplicate runs
     if isempty(attacks)
         error("No attack type has been specified!")
@@ -186,7 +185,7 @@ for experiment_idx = 1:numel(experiment_list)
     if ismember("time shift", attacks)
         assert(on_grid(t0_attacker - t0_true), 'time shift (%g s) is not a multiple of dt', t0_attacker - t0_true);
     end
-
+    
     pivot_vals = attacks;
     
     constraints = "none";
@@ -256,12 +255,12 @@ for experiment_idx = 1:numel(experiment_list)
                 wf = repmat(sin(2*pi*t.*f_c + phase), 1,1,1,nTrials,nDeployments);   % K x S_max, repeated
 
             case "peak"
-                peak_same_location = true;
-                candidate_locs = [dt, Tp];   % the two worst-case candidates identified earlier
+                peak_same_location = false;
+                candidate_locs = t(2:end);   % the two worst-case candidates identified earlier
                 if peak_same_location
-                    peak_loc = repmat(candidate_locs(randi(2)), 1, S_max);
+                    peak_loc = repmat(candidate_locs(randi(numel(candidate_locs))), 1, S_max);
                 else
-                    peak_loc = candidate_locs(randi(2, 1, S_max));
+                    peak_loc = candidate_locs(randi(numel(candidate_locs), 1, S_max));
                 end
                 waveform = zeros(K, S_max);
                 for a = 1:S_max
@@ -495,7 +494,7 @@ for experiment_idx = 1:numel(experiment_list)
                             % Get time domain matrix for Qn.
                             [~, Qn_matrix] = get_time_domain(mag_sqr_H,dt,nDeployments);
 
-                            Omega_2_t0_search = reshape(sum(ui_t0_search .* ci .* ai, 2), K, 1, K, 1, nDeployments);
+                            Omega_2_t0_search = reshape(sum(ui_t0_search .* ci, 2), K, 1, K, 1, nDeployments);
                             mf_with_y = dt*dt*pagemtimes(pagemtimes(reshape(real(y_m) + sum(ci .* bi, 2), 1, K, 1, nTrials, nDeployments), reshape(Qn_matrix,K,K,1,1,nDeployments)), Omega_2_t0_search);
                             [~,I] = max(mf_with_y, [], 3);
 
@@ -791,7 +790,7 @@ for experiment_idx = 1:numel(experiment_list)
     save_images = false;
 
     files_to_save = ["avg_dep_mse_" + txt_list, "avg_dep_var", "avg_dep_mse", "avg_dep_bias", "avg_dep_crlb", "avg_dep_crlb_oracle",...
-        "agent_db_values", "channel_snr", "selected_schemes", "dropout_vals", "sensor_vals", "channel_db_values",...
+        "agent_db_values", "channel_snr", "selected_schemes", "sensor_vals", "channel_db_values",...
         "experiment", "sensor_dimension", "save_images", "K", "nDeployments", "constraints", "transforms", "coeff_types", "approaches",...
         "iter_arr", "iter_length", "all_strats", "num_strats", "save_images", "alpha_uses_true_t0",...
         "T0", "Tp", "alpha_true", "t0_true", "pivot_vals", "Mtot", "N", "S", "S_max","attacks", "attacker_enabled"];
@@ -818,5 +817,4 @@ for experiment_idx = 1:numel(experiment_list)
     save(experiment + "_results.mat", "summary_tbl", "det_tp", "det_fp", "det_fn", "fp_rate_combined", "-append");
     
     %% Plotting placeholder
-    plot_attacks
 end
