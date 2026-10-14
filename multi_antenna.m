@@ -56,7 +56,7 @@ t0_true = dt*ceil(1.5/dt);
 alpha_uses_true_t0 = false;
 
 % Set the number of antennas
-num_antennas = 9;
+num_antennas = 20;
 Mtot = 2*num_antennas;
 
 %%% Always generate w, n, and channel gain for maximum S, then use subsets for different S trials
@@ -114,6 +114,11 @@ attacker_seed = 42;
 attacker_beta = 0.1;   % "amplitude scale": attacker transmits beta * u_i(t)
 t0_attacker   = 3;     % "time shift": attacker's pulse is moved to start at t0_attacker
 
+% Spread estimator used by the per-sensor alpha/t0 outlier tests IN THE DETECTOR (all three are
+% always computed for the ROC): "mad" (1.4826*MAD), "sn" or "qn" (Rousseeuw-Croux).
+detector_spread = "qn";
+assert(ismember(detector_spread, ["mad", "sn", "qn"]), 'detector_spread must be "mad", "sn" or "qn".');
+
 w_psd_constant = 1;
 n_psd_constant = 1;
 N = 2*K - 1;
@@ -124,8 +129,8 @@ t0_grid_top = reshape(t,1,1,[]);
 D_template = reshape(R00_full(:,:,:,1), K, K);   % K x K, [D_template]_{k,l} = rho(t_k - t_l)
 
 [U_D, Sigma_D, ~] = svd(D_template, 'econ');
-sv_energy = cumsum(diag(Sigma_D).^2) / sum(diag(Sigma_D).^2);
-d_sub = find(sv_energy >= 0.999, 1, 'first');
+% sv_energy = cumsum(diag(Sigma_D).^2) / sum(diag(Sigma_D).^2);
+% d_sub = find(sv_energy >= 0.999, 1, 'first');
 % Phi = U_D(:, 1:d_sub);           % K x d_sub: honest-signal subspace
 
 % Eigenvalues of D_template itself (already computed via U_D/Sigma_D above)
@@ -135,7 +140,7 @@ lam_D = diag(Sigma_D);   % K x 1
 D_template_v = U_D.' * D_template;   % K x K
 mfTemplateFFT_raw = fft(sensor_signal(t, Tp, norm_fact), N, 1);   % used by estimate_with_geometry
 
-log_msg(verbosity_level, 1, 'Subspace-projection residual test: d = %d, K-d = %d', d_sub, K-d_sub);
+% log_msg(verbosity_level, 1, 'Subspace-projection residual test: d = %d, K-d = %d', d_sub, K-d_sub);
 
 %% Define Anonymous Expressions
 mag_sqr_S0_internal = @(w) (norm_fact^2) * (2*Bee.^2 .* (1 + cos(w.*pi./Bee)) ) ./ (w.^2 - Bee.^2).^2;
@@ -166,7 +171,7 @@ for experiment_idx = 1:numel(experiment_list)
     channel_snr = linspace(0,10,5);
 
     % Attacks to test -- each runs the full Monte Carlo sweep. Valid names are listed below.
-    attacks = ["none", "noise", "sinusoid", "peak", "flip", "time shift"];
+    attacks = "noise"; % ["none", "noise", "sinusoid", "peak", "flip", "time shift"];
 
     valid_attacks = ["none", "noise", "sinusoid", "peak", "flip", "time shift"];
     attacks = unique(attacks, 'stable');   % no duplicate runs
@@ -228,6 +233,23 @@ for experiment_idx = 1:numel(experiment_list)
     det_size = [numel(pivot_vals), size(channel_db_values,2), length(agent_db_values), sensor_dimension];
     det_tp = zeros(det_size);  det_fp = zeros(det_size);  det_fn = zeros(det_size);
     fp_rate_combined = zeros(det_size);   % honest-sensor false-flag rate
+
+    % ROC (Pd vs Pf): per-sensor flag counts with each test's OWN threshold swept over its
+    % natural range (no normalization). The +/-Inf end points flag every sensor / none, so
+    % each curve can be closed at (1,1) and (0,0).
+    %   normcorr: flagged if norm_corr < corr_min                              -> sweep corr_min
+    %   alpha/t0: flagged if |x_i - median| / scale > k, scale = 1.4826*MAD, Sn or Qn  -> sweep k
+    roc_corr_grid = [-Inf, linspace(0, 1, 201), Inf];   % corr_min values
+    roc_k_grid    = [-Inf, 0:0.125:10, Inf];            % threshold k in robust-sigma units (alpha_delta_k / t0_delta_k)
+    roc_spread_names = ["mad", "sn", "qn"];             % 2nd dimension of the alpha/t0 arrays
+    roc_corr_det  = zeros([numel(roc_corr_grid), det_size]);   % attacker cases flagged
+    roc_corr_fa   = zeros([numel(roc_corr_grid), det_size]);   % honest cases flagged
+    roc_alpha_det = zeros([numel(roc_k_grid), numel(roc_spread_names), det_size]);
+    roc_alpha_fa  = zeros([numel(roc_k_grid), numel(roc_spread_names), det_size]);
+    roc_t0_det    = zeros([numel(roc_k_grid), numel(roc_spread_names), det_size]);
+    roc_t0_fa     = zeros([numel(roc_k_grid), numel(roc_spread_names), det_size]);
+    roc_n_atk = zeros(det_size);   % number of attacker-sensor cases (sensor x trial x deployment)
+    roc_n_hon = zeros(det_size);   % number of honest-sensor cases
 
     % Start run timer
     log_msg(verbosity_level, 1, 'Starting runtime...');
@@ -564,6 +586,7 @@ for experiment_idx = 1:numel(experiment_list)
 
                                 %% --- Per-sensor GLS delay and amplitude
                                 t0_col_idx_per_sensor = zeros(S, nTrials, nDeployments);
+                                t0_frac_per_sensor    = zeros(S, nTrials, nDeployments);   % sub-sample t0_i
                                 c_scalar_at_best = zeros(S, nTrials, nDeployments);   % c_i(tau_hat)
                                 G_scalar_at_best = zeros(S, nTrials, nDeployments);   % G_i(tau_hat)
 
@@ -588,6 +611,19 @@ for experiment_idx = 1:numel(experiment_list)
                                         c_scalar_at_best(i,:,d_idx) = c_i_all_tau(lin_idx);
                                         G_scalar_at_best(i,:,d_idx) = G_i_all_tau(best_col);
                                         t0_col_idx_per_sensor(i,:,d_idx) = best_col;
+
+                                        % Sub-sample peak: parabola through the samples at best_col-1, best_col, best_col+1
+                                        inner = best_col > 1 & best_col < K;
+                                        r0 = ratio(lin_idx);
+                                        rm = r0;
+                                        rp = r0;
+                                        rm(inner) = ratio(sub2ind([nTrials, K], find(inner), best_col(inner) - 1));
+                                        rp(inner) = ratio(sub2ind([nTrials, K], find(inner), best_col(inner) + 1));
+                                        curv  = rm - 2*r0 + rp;
+                                        delta = zeros(nTrials, 1);
+                                        ok = inner & curv < 0;   % a genuine local maximum
+                                        delta(ok) = min(max(0.5 * (rm(ok) - rp(ok)) ./ curv(ok), -0.5), 0.5);
+                                        t0_frac_per_sensor(i,:,d_idx) = t(best_col) + delta*dt;
                                     end
                                 end
 
@@ -612,32 +648,69 @@ for experiment_idx = 1:numel(experiment_list)
 
                                 %% --- Individual (per-sensor) t0 and alpha estimation ---
                                 mi_sq = reshape(mi_5d.^2, S, 1, nDeployments);
-                                t0_i_hat    = reshape(t(t0_col_idx_per_sensor), 1, S, nTrials, nDeployments);
+                                t0_i_hat    = reshape(t0_frac_per_sensor, 1, S, nTrials, nDeployments);   % sub-sample
                                 alpha_i_hat = reshape(c_scalar_at_best ./ (G_scalar_at_best .* mi_sq), 1, S, nTrials, nDeployments);
 
                                 %% --- Median-of-sensors estimates
                                 alpha_estimates_trimmed = median(alpha_i_hat, 2);
                                 t0_estimates_trimmed    = median(t0_i_hat, 2);
 
-                                %% --- MAD Test
+                                %% --- Robust outlier tests: flag if |x_i - median| / scale > k, where scale
+                                % is a robust std estimate: 1.4826*MAD, Sn or Qn (all consistent for Gaussian data).
                                 med_alpha = median(alpha_i_hat, 2);
                                 mad_alpha = mad(alpha_i_hat, 1, 2);   % median absolute deviation across sensors
                                 med_t0 = median(t0_i_hat, 2);
                                 mad_t0 = mad(t0_i_hat, 1, 2);
 
-                                tol_pct = 0.15;
-                                alpha_tol = alpha_true * tol_pct;
-                                t0_tol = t0_true * tol_pct;
+                                mad_scale = 1.4826;   % MAD -> std for Gaussian data, so k is in "sigmas"
+                                spread_names = ["mad", "sn", "qn"];
+                                scale_alpha = {mad_scale*mad_alpha, robust_scale(alpha_i_hat, "sn"), robust_scale(alpha_i_hat, "qn")};
+                                scale_t0    = {mad_scale*mad_t0,    robust_scale(t0_i_hat, "sn"),    robust_scale(t0_i_hat, "qn")};
+                                z_alpha_all = cell(1, numel(spread_names));
+                                z_t0_all    = cell(1, numel(spread_names));
+                                for sp = 1:numel(spread_names)
+                                    z_alpha_all{sp} = abs(alpha_i_hat - med_alpha) ./ scale_alpha{sp};
+                                    z_t0_all{sp}    = abs(t0_i_hat    - med_t0)    ./ scale_t0{sp};
+                                    z_alpha_all{sp}(isnan(z_alpha_all{sp})) = 0;   % 0/0: zero spread and the sensor sits at the median
+                                    z_t0_all{sp}(isnan(z_t0_all{sp}))       = 0;
+                                end
+                                z_alpha = z_alpha_all{spread_names == detector_spread};   % scores used by the detector
+                                z_t0    = z_t0_all{spread_names == detector_spread};
 
                                 %%% With alpha
-                                alpha_delta_k = 5;
-                                alpha_flagged = abs(alpha_i_hat - med_alpha) > max(alpha_tol, alpha_delta_k*mad_alpha);
+                                alpha_delta_k = 3;
+                                alpha_flagged = z_alpha > alpha_delta_k;
                                 flagged = flagged | alpha_flagged;
 
                                 %%% With t0
-                                t0_delta_k = 5;
-                                t0_flagged = abs(t0_i_hat - med_t0) > max(t0_tol, t0_delta_k*mad_t0);
+                                t0_delta_k = 3;
+                                t0_flagged = z_t0 > t0_delta_k;
                                 flagged = flagged | t0_flagged;
+
+                                %% --- ROC: count flags at every threshold on each test's own grid.
+                                % Only the counts change with the thresholds -- nulling still uses the
+                                % current corr_min / k above.
+                                is_atk = false(1, S);
+                                is_atk(true_atk) = true;
+                                roc_idx = {pivot_idx, channel_db_idx, agent_db_idx, save_dim};
+                                pick = @(x, mask) reshape(x(1, mask, :, :), [], 1);   % (sensor, trial, deployment) cases
+
+                                % normcorr: flagged if norm_corr < corr_min
+                                corr_atk = pick(norm_corr_all, is_atk);
+                                corr_hon = pick(norm_corr_all, ~is_atk);
+                                roc_corr_det(:, roc_idx{:}) = roc_corr_det(:, roc_idx{:}) + sum(corr_atk < roc_corr_grid, 1).';
+                                roc_corr_fa(:, roc_idx{:})  = roc_corr_fa(:, roc_idx{:})  + sum(corr_hon < roc_corr_grid, 1).';
+
+                                % alpha / t0 outlier tests, for every spread estimator: flagged if z > k
+                                for sp = 1:numel(spread_names)
+                                    roc_alpha_det(:, sp, roc_idx{:}) = roc_alpha_det(:, sp, roc_idx{:}) + sum(pick(z_alpha_all{sp}, is_atk)  > roc_k_grid, 1).';
+                                    roc_alpha_fa(:, sp, roc_idx{:})  = roc_alpha_fa(:, sp, roc_idx{:})  + sum(pick(z_alpha_all{sp}, ~is_atk) > roc_k_grid, 1).';
+                                    roc_t0_det(:, sp, roc_idx{:})    = roc_t0_det(:, sp, roc_idx{:})    + sum(pick(z_t0_all{sp}, is_atk)     > roc_k_grid, 1).';
+                                    roc_t0_fa(:, sp, roc_idx{:})     = roc_t0_fa(:, sp, roc_idx{:})     + sum(pick(z_t0_all{sp}, ~is_atk)    > roc_k_grid, 1).';
+                                end
+
+                                roc_n_atk(roc_idx{:}) = roc_n_atk(roc_idx{:}) + numel(corr_atk);
+                                roc_n_hon(roc_idx{:}) = roc_n_hon(roc_idx{:}) + numel(corr_hon);
 
                                 %% Nominal estimation using multiple receive antennas
                                 % The t0 search and the alpha estimate are both linear in the per-branch
@@ -769,7 +842,7 @@ for experiment_idx = 1:numel(experiment_list)
                         end
 
                         % Checkpoint after each channel-SNR point so a crash doesn't lose finished results.
-                        save(experiment + "_checkpoint.mat", "rho_*", "det_*", "fp_rate_combined", "pivot_vals", ...
+                        save(experiment + "_checkpoint.mat", "rho_*", "det_*", "roc_*", "fp_rate_combined", "pivot_vals", ...
                             "batch_idx", "agent_db_idx", "sensor_idx", "scheme_idx", "channel_db_idx");
 
                         total_channel_db_time = toc(channel_db_start);
@@ -839,7 +912,10 @@ for experiment_idx = 1:numel(experiment_list)
     summary_tbl = cell2table(rows, 'VariableNames', cellstr(var_names));
     disp(summary_tbl)
     writetable(summary_tbl, experiment + "_summary.csv");
-    save(experiment + "_results.mat", "summary_tbl", "det_tp", "det_fp", "det_fn", "fp_rate_combined", "-append");
+    save(experiment + "_results.mat", "summary_tbl", "det_tp", "det_fp", "det_fn", "fp_rate_combined", ...
+        "roc_corr_grid", "roc_k_grid", "roc_spread_names", "detector_spread", "roc_corr_det", "roc_corr_fa", ...
+        "roc_alpha_det", "roc_alpha_fa", "roc_t0_det", "roc_t0_fa", "roc_n_atk", "roc_n_hon", ...
+        "corr_min", "alpha_delta_k", "t0_delta_k", "mad_scale", "-append");   % current operating point
     
     %% Plotting placeholder
 end
