@@ -107,12 +107,19 @@ assert(on_grid(Tp),      'Tp = %g is not a multiple of dt = %g', Tp, dt);
 
 %% Byzantine attacker configuration
 attacker_enabled = true;
-attacker_idx     = [4,5,6]; % [2,4]      % sensor index/indices (within 1:S) that are compromised
+attacker_idx     = [1,2,3]; % [2,4]      % sensor index/indices (within 1:S) that are compromised
 attacker_db      = 0;      % attacker "SNR", same convention as agent_db (see below)
 attacker_seed = 42;
 % Attack-specific parameters (each is used only by its attack type)
 attacker_beta = 0.1;   % "amplitude scale": attacker transmits beta * u_i(t)
 t0_attacker   = 3;     % "time shift": attacker's pulse is moved to start at t0_attacker
+
+% Time-shift sensitivity experiment (experiment_list = "time_shift_sensitivity"): one time-shift attack
+% per multiple n, with the attacker's pulse moved to t0_true + n*ts_delta. A no-attack reference
+% ("none") is added automatically. Fractional n gives sub-sample shifts (linear interpolation of the
+% smooth matched-filter output in shift_waveform).
+ts_delta     = dt;                                % Delta = one sample
+ts_multiples = [0.25 0.5 1 2 4 8 16 32 64];       % n
 
 % Spread estimator used by the per-sensor alpha/t0 outlier tests IN THE DETECTOR (all three are
 % always computed for the ROC): "mad" (1.4826*MAD), "sn" or "qn" (Rousseeuw-Croux).
@@ -187,7 +194,7 @@ Hm_arr = @(w, lambda) zeroIfnan(Hm_arr_internal(w, lambda)) + (w == Bee | w == -
 % t0_branch_fisher = @(bm, lambda) integral(@(w) bm.^2 .* (w .* mag_sqr_S0(w)).^2 ./ Vm_arr(w, lambda), -Inf, Inf, 'ArrayValued', true);
 
 %% Define experiment list
-experiment_list = "multi_antenna_base";
+experiment_list = "time_shift_sensitivity";   % and/or "multi_antenna_base", "time_shift_sensitivity"
 
 for experiment_idx = 1:numel(experiment_list)
     experiment = experiment_list(experiment_idx);
@@ -201,7 +208,7 @@ for experiment_idx = 1:numel(experiment_list)
     channel_snr = linspace(0,10,5);
 
     % Attacks to test -- each runs the full Monte Carlo sweep. Valid names are listed below.
-    attacks = ["noise", "sinusoid", "peak", "flip", "time shift"]; % ["none", "noise", "sinusoid", "peak", "flip", "time shift"];
+    attacks = ["none", "noise", "sinusoid", "peak", "flip", "time shift"]; % ["none", "noise", "sinusoid", "peak", "flip", "time shift"];
 
     valid_attacks = ["none", "noise", "sinusoid", "peak", "flip", "time shift", "amplitude scale"];
     attacks = unique(attacks, 'stable');   % no duplicate runs
@@ -212,10 +219,25 @@ for experiment_idx = 1:numel(experiment_list)
     if ~isempty(bad)
         error("Unknown attack type(s): %s. Valid: %s", strjoin(bad, ", "), strjoin(valid_attacks, ", "));
     end
-    if ismember("time shift", attacks)
-        assert(on_grid(t0_attacker - t0_true), 'time shift (%g s) is not a multiple of dt', t0_attacker - t0_true);
+
+    % Each sweep entry ("pivot") has a label (pivot_vals, used in tables and plots), an attack type
+    % (pivot_types) and, for time shifts, the shift in seconds (pivot_shift).
+    if experiment == "time_shift_sensitivity"
+        ts_shift_s   = ts_multiples * ts_delta;          % shift of each attack (s)
+        ts_shift_pct = 100 * ts_shift_s / t0_true;       % ... as a percentage of t0_true
+        attacks      = ["none", "time shift " + compose("%g", ts_multiples) + "dt"];
+        pivot_types  = ["none", repmat("time shift", 1, numel(ts_multiples))];
+        pivot_shift  = [NaN, ts_shift_s];
+        log_msg(verbosity_level, 1, 'Time-shift sensitivity: Delta = dt = %.4g ms = %.4g%% of t0_true (%.4g s)', ...
+            1e3*ts_delta, 100*ts_delta/t0_true, t0_true);
+        for q = 1:numel(ts_multiples)
+            log_msg(verbosity_level, 1, '  n = %-5g shift = %8.3f ms = %7.3f%% of t0_true', ts_multiples(q), 1e3*ts_shift_s(q), ts_shift_pct(q));
+        end
+    else
+        pivot_types = attacks;
+        pivot_shift = nan(size(attacks));
+        pivot_shift(attacks == "time shift") = t0_attacker - t0_true;
     end
-    
     pivot_vals = attacks;
     
     constraints = "none";
@@ -307,12 +329,12 @@ for experiment_idx = 1:numel(experiment_list)
         f_nominal = Bee/(2*pi);   % = 1/(2*Tp), reference frequency near the honest passband
         attack_waveforms = cell(numel(pivot_vals), 1);   % unit-energy K x S_max x 1 x nTrials x D, or [] if unused
         for pivot_idx = 1:numel(pivot_vals)
-            if pivot_vals(pivot_idx) == "noise"
+            if pivot_types(pivot_idx) == "noise"
                 rng(attacker_seed + batch_idx);   % fresh attack noise for each batch of deployments
             else
                 rng(attacker_seed);               % same deterministic waveform in every batch
             end
-            switch pivot_vals(pivot_idx)
+            switch pivot_types(pivot_idx)
                 case "noise"
                     wf = randn(K,S_max,1,nTrials,nDeployments);
 
@@ -380,13 +402,13 @@ for experiment_idx = 1:numel(experiment_list)
                 ui_honest_atk = ui_no_attack(:,atk,:,:,:);
                 ui_atk_by_attack = cell(numel(pivot_vals), 1);
                 for pivot_idx = 1:numel(pivot_vals)
-                    switch pivot_vals(pivot_idx)
+                    switch pivot_types(pivot_idx)
                         case "flip"              % -alpha*m_i^2*rho(t-t0) - w_i(t)
                             ui_atk_by_attack{pivot_idx} = -ui_honest_atk;
                         case "amplitude scale"   % beta*(alpha*m_i^2*rho(t-t0) + w_i(t))
                             ui_atk_by_attack{pivot_idx} = attacker_beta * ui_honest_atk;
                         case "time shift"        % shifted copy, truncated to [0, T0]
-                            ui_atk_by_attack{pivot_idx} = shift_waveform(ui_honest_atk, t, t0_attacker - t0_true);
+                            ui_atk_by_attack{pivot_idx} = shift_waveform(ui_honest_atk, t, pivot_shift(pivot_idx));
                         case "none"              % no attack: compromised sensors stay honest
                             ui_atk_by_attack{pivot_idx} = [];   % unused -- out_cws is the honest signal
                         otherwise                % replaced by a scaled attack waveform
@@ -544,7 +566,8 @@ for experiment_idx = 1:numel(experiment_list)
 
                         %% ---- Attack loop (innermost): only the compromised sensors' content changes ----
                         for pivot_idx = 1:numel(pivot_vals)
-                            attack_type = pivot_vals(pivot_idx);
+                            attack_type  = pivot_types(pivot_idx);   % attack mechanism
+                            attack_label = pivot_vals(pivot_idx);    % label for logs and tables
                             attack_start = tic;
 
                             % Ground-truth compromised set for this run (empty when there is no attack).
@@ -871,7 +894,7 @@ for experiment_idx = 1:numel(experiment_list)
                                 end
 
                                 log_msg(verbosity_level, 4, '[%s] Detection accuracy: TP=%d, FP=%d, FN=%d (%d null geometries cached)', ...
-                                    attack_type, tp_total, fp_total, fn_total, geom_cache.Count);
+                                    attack_label, tp_total, fp_total, fn_total, geom_cache.Count);
 
                                 % --- Honest-sensor false-flag rate per test
                                 honest_idx_diag = setdiff(1:S, true_atk);
@@ -913,7 +936,7 @@ for experiment_idx = 1:numel(experiment_list)
                             end
 
                             attack_time = toc(attack_start);
-                            log_msg(verbosity_level, 3, 'Attack "%s": %dm %.1fs', attack_type, floor(attack_time/60), mod(attack_time,60));
+                            log_msg(verbosity_level, 3, 'Attack "%s": %dm %.1fs', attack_label, floor(attack_time/60), mod(attack_time,60));
                         end
 
                         % Checkpoint after each channel-SNR point so a crash doesn't lose finished results.
@@ -969,10 +992,13 @@ for experiment_idx = 1:numel(experiment_list)
         "agent_db_values", "channel_snr", "selected_schemes", "sensor_vals", "channel_db_values",...
         "experiment", "sensor_dimension", "save_images", "K", "nDeployments", "nDeployments_total", "constraints", "transforms", "coeff_types", "approaches",...
         "iter_arr", "iter_length", "all_strats", "num_strats", "save_images", "alpha_uses_true_t0",...
-        "T0", "Tp", "alpha_true", "t0_true", "pivot_vals", "Mtot", "N", "S", "S_max","attacks", "attacker_enabled", ...
+        "T0", "Tp", "alpha_true", "t0_true", "pivot_vals", "Mtot", "N", "S", "S_max","attacks", "attacker_enabled", "pivot_types", "pivot_shift", ...
         "avg_dep_mse_conv", "conventional_methods", "conv_trim", "conv_mad_k", "conv_rejection"];
     
     save(experiment + "_results.mat", files_to_save{:})
+    if experiment == "time_shift_sensitivity"
+        save(experiment + "_results.mat", "ts_delta", "ts_multiples", "ts_shift_s", "ts_shift_pct", "-append");
+    end
 
     %% Compile per-attack summary (first strategy / scheme / agent SNR / sensor count)
     method_names = ["defended", "undefended", "oracle", "full_honest", conventional_methods];
