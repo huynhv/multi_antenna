@@ -311,7 +311,9 @@ for experiment_idx = 1:numel(experiment_list)
     loopTic = tic;
 
     nBatches = ceil(nDeployments_total / dep_batch_size);
+    batch_time = nan(1, nBatches);   % wall-clock seconds per deployment batch
     for batch_idx = 1:nBatches
+        batch_start = tic;
         dep_range = (batch_idx-1)*dep_batch_size + 1 : min(batch_idx*dep_batch_size, nDeployments_total);
         nDeployments = numel(dep_range);   % deployments in THIS batch -- every array below is sized by it
         log_msg(verbosity_level, 1, 'Deployment batch %d of %d (deployments %d-%d)', batch_idx, nBatches, dep_range(1), dep_range(end));
@@ -950,6 +952,13 @@ for experiment_idx = 1:numel(experiment_list)
                 end
             end
         end
+
+        % Batch runtime, with an estimate of the time left from the average batch so far
+        batch_time(batch_idx) = toc(batch_start);
+        eta = mean(batch_time(1:batch_idx)) * (nBatches - batch_idx);
+        log_msg(verbosity_level, 1, 'Batch %d of %d done in %dm %.1fs (%.2f s per deployment) | elapsed %dm %.1fs | est. remaining %dm %.1fs', ...
+            batch_idx, nBatches, floor(batch_time(batch_idx)/60), mod(batch_time(batch_idx),60), batch_time(batch_idx)/nDeployments, ...
+            floor(toc(loopTic)/60), mod(toc(loopTic),60), floor(eta/60), mod(eta,60));
     end   % deployment batches
 
     % Stop run timer.
@@ -992,7 +1001,7 @@ for experiment_idx = 1:numel(experiment_list)
         "agent_db_values", "channel_snr", "selected_schemes", "sensor_vals", "channel_db_values",...
         "experiment", "sensor_dimension", "save_images", "K", "nDeployments", "nDeployments_total", "constraints", "transforms", "coeff_types", "approaches",...
         "iter_arr", "iter_length", "all_strats", "num_strats", "save_images", "alpha_uses_true_t0",...
-        "T0", "Tp", "alpha_true", "t0_true", "pivot_vals", "Mtot", "N", "S", "S_max","attacks", "attacker_enabled", "pivot_types", "pivot_shift", ...
+        "T0", "Tp", "alpha_true", "t0_true", "pivot_vals", "Mtot", "N", "S", "S_max","attacks", "attacker_enabled", "pivot_types", "pivot_shift", "batch_time", "runtime", ...
         "avg_dep_mse_conv", "conventional_methods", "conv_trim", "conv_mad_k", "conv_rejection"];
     
     save(experiment + "_results.mat", files_to_save{:})
