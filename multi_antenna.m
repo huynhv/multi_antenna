@@ -8,12 +8,12 @@ addpath('.\functions')
 verbosity_level = 5;   % 1 = major sections only, 2 = + sub-steps/channel-SNR, 3 = + diagnostics
 
 % Set seed for reproducibility
-seed = 22;
+seed = 264;
 rng(seed);
 
 use_W = true;
 
-nDeployments_total = 10;   % total deployments to simulate
+nDeployments_total = 100;   % total deployments to simulate
 dep_batch_size     = 10; % 10;    % deployments held in memory at once (~3-4 GB per batch of 10)
 % Set the number of measurements per sensor, starting from 0
 K = 301;
@@ -21,7 +21,7 @@ K = 301;
 nTrials = 500;
 
 % Set number of sensors
-sensor_vals = 9; % [5,10]
+sensor_vals = 9;
 sensor_dimension = length(sensor_vals);
 
 % Set observation window length in seconds.
@@ -56,7 +56,7 @@ t0_true = dt*ceil(1.5/dt);
 alpha_uses_true_t0 = false;
 
 % Set the number of antennas
-num_antennas = 20;
+num_antennas = 9;
 Mtot = 2*num_antennas;
 
 %%% Always generate w, n, and channel gain for maximum S, then use subsets for different S trials
@@ -119,6 +119,29 @@ t0_attacker   = 3;     % "time shift": attacker's pulse is moved to start at t0_
 detector_spread = "qn";
 assert(ismember(detector_spread, ["mad", "sn", "qn"]), 'detector_spread must be "mad", "sn" or "qn".');
 
+% Conventional baselines built from the per-sensor estimates (alpha_i_hat, t0_i_hat), independent of
+% the proposed detector. Any subset of:
+%   Simple robust aggregation (coordinate-wise, no outlier tests):
+%     "median"        : median over all sensors
+%     "trimmed_mean"  : mean after dropping the conv_trim smallest and conv_trim largest values
+%   Optional ablations (MAD outlier rejection, then averaging):
+%     "skipped_mean"  : mean of the sensors kept by a conventional MAD outlier rule (median if none kept)
+%     "skipped_wmean" : inverse-variance weighted mean of the same kept sensors (same fallback)
+conventional_methods = ["median"];
+valid_conventional = ["median", "trimmed_mean", "skipped_mean", "skipped_wmean"];
+assert(all(ismember(conventional_methods, valid_conventional)), ...
+    'conventional_methods may only contain: %s.', strjoin(valid_conventional, ', '));
+conventional_methods = unique(conventional_methods, 'stable');
+% Trimmed mean: values trimmed from EACH end. Default f = number of compromised sensors (the textbook
+% Byzantine choice and the trimmed mean's best case -- it assumes the attack size is known).
+conv_trim = numel(attacker_idx);
+% Rejection rule of the skipped means: drop sensor i if |x_i - median| / (1.4826*MAD) > conv_mad_k
+%   "per_parameter": alpha outliers dropped from the alpha mean, t0 outliers from the t0 mean (Hampel X84)
+%   "joint"        : drop the sensor from both means if either its alpha or its t0 is an outlier
+conv_mad_k     = 3;
+conv_rejection = "per_parameter";
+assert(ismember(conv_rejection, ["per_parameter", "joint"]), 'conv_rejection must be "per_parameter" or "joint".');
+
 w_psd_constant = 1;
 n_psd_constant = 1;
 N = 2*K - 1;
@@ -138,6 +161,13 @@ lam_D = diag(Sigma_D);   % K x 1
 % Project D_template's columns into U_D's eigenbasis once -- reused every
 % (sensor, deployment) below since it doesn't depend on either.
 D_template_v = U_D.' * D_template;   % K x K
+% d rho(t - tau)/d tau for every candidate tau (central differences across D_template's columns),
+% projected the same way -- gives the per-sensor t0_i precision used by the weighted skipped mean.
+D_deriv = zeros(K, K);
+D_deriv(:, 2:K-1) = (D_template(:, 3:K) - D_template(:, 1:K-2)) / (2*dt);
+D_deriv(:, 1)     = (D_template(:, 2) - D_template(:, 1)) / dt;
+D_deriv(:, K)     = (D_template(:, K) - D_template(:, K-1)) / dt;
+D_deriv_v = U_D.' * D_deriv;          % K x K
 mfTemplateFFT_raw = fft(sensor_signal(t, Tp, norm_fact), N, 1);   % used by estimate_with_geometry
 
 % log_msg(verbosity_level, 1, 'Subspace-projection residual test: d = %d, K-d = %d', d_sub, K-d_sub);
@@ -157,7 +187,7 @@ Hm_arr = @(w, lambda) zeroIfnan(Hm_arr_internal(w, lambda)) + (w == Bee | w == -
 % t0_branch_fisher = @(bm, lambda) integral(@(w) bm.^2 .* (w .* mag_sqr_S0(w)).^2 ./ Vm_arr(w, lambda), -Inf, Inf, 'ArrayValued', true);
 
 %% Define experiment list
-experiment_list = "multi_antenna_disjoint";
+experiment_list = "multi_antenna_base";
 
 for experiment_idx = 1:numel(experiment_list)
     experiment = experiment_list(experiment_idx);
@@ -171,9 +201,9 @@ for experiment_idx = 1:numel(experiment_list)
     channel_snr = linspace(0,10,5);
 
     % Attacks to test -- each runs the full Monte Carlo sweep. Valid names are listed below.
-    attacks = "noise"; % ["none", "noise", "sinusoid", "peak", "flip", "time shift"];
+    attacks = ["noise", "sinusoid", "peak", "flip", "time shift"]; % ["none", "noise", "sinusoid", "peak", "flip", "time shift"];
 
-    valid_attacks = ["none", "noise", "sinusoid", "peak", "flip", "time shift"];
+    valid_attacks = ["none", "noise", "sinusoid", "peak", "flip", "time shift", "amplitude scale"];
     attacks = unique(attacks, 'stable');   % no duplicate runs
     if isempty(attacks)
         error("No attack type has been specified!")
@@ -227,7 +257,10 @@ for experiment_idx = 1:numel(experiment_list)
     rho_empirical_mse_undefended = rho_crlb;   % MSE with NO defense applied -- only meaningful/populated under attack
     rho_empirical_mse_oracle = rho_crlb;   % MSE with attacker PERFECTLY, freely removed -- upper bound, only under attack
     rho_empirical_mse_basis_supp = rho_crlb;
-    rho_empirical_mse_trimmed = rho_crlb;
+    rho_mse_conv = struct();   % one MSE array per conventional baseline (same layout as rho_empirical_mse)
+    for cm = conventional_methods
+        rho_mse_conv.(char(cm)) = rho_crlb;
+    end
 
     % Detection statistics per (attack, channel SNR, agent SNR, sensor count), summed over trials and deployments.
     det_size = [numel(pivot_vals), size(channel_db_values,2), length(agent_db_values), sensor_dimension];
@@ -423,7 +456,7 @@ for experiment_idx = 1:numel(experiment_list)
 
                     for channel_db_idx = 1:size(channel_db_values,2)
                         channel_db_start = tic;
-                        log_msg(verbosity_level, 2, 'Scheme %s | Agent SNR = %d dB | Channel SNR = %g dB | S = %d', ...
+                        log_msg(verbosity_level, 2, 'Scheme = %s | Agent SNR = %d dB | Channel SNR = %g dB | S = %d', ...
                             scheme, agent_db, channel_db_values(scheme_idx,channel_db_idx,agent_db_idx), S);
 
                         if scheme == "EPC"
@@ -589,6 +622,7 @@ for experiment_idx = 1:numel(experiment_list)
                                 t0_frac_per_sensor    = zeros(S, nTrials, nDeployments);   % sub-sample t0_i
                                 c_scalar_at_best = zeros(S, nTrials, nDeployments);   % c_i(tau_hat)
                                 G_scalar_at_best = zeros(S, nTrials, nDeployments);   % G_i(tau_hat)
+                                Gd_scalar_at_best = zeros(S, nTrials, nDeployments);  % G'_i(tau_hat): derivative energy (t0_i precision)
 
                                 for i = 1:S
                                     u_i_v_all = pagemtimes(U_D.', reshape(hat_u_all(:,i,:,:), K, nTrials, nDeployments));  % K x nTrials x nDeployments
@@ -610,20 +644,12 @@ for experiment_idx = 1:numel(experiment_list)
                                         lin_idx = sub2ind([nTrials, K], (1:nTrials).', best_col);
                                         c_scalar_at_best(i,:,d_idx) = c_i_all_tau(lin_idx);
                                         G_scalar_at_best(i,:,d_idx) = G_i_all_tau(best_col);
+                                        Gd_i_all_tau = sum((D_deriv_v.^2) .* weights, 1);       % 1 x K
+                                        Gd_scalar_at_best(i,:,d_idx) = Gd_i_all_tau(best_col);
                                         t0_col_idx_per_sensor(i,:,d_idx) = best_col;
 
-                                        % Sub-sample peak: parabola through the samples at best_col-1, best_col, best_col+1
-                                        inner = best_col > 1 & best_col < K;
-                                        r0 = ratio(lin_idx);
-                                        rm = r0;
-                                        rp = r0;
-                                        rm(inner) = ratio(sub2ind([nTrials, K], find(inner), best_col(inner) - 1));
-                                        rp(inner) = ratio(sub2ind([nTrials, K], find(inner), best_col(inner) + 1));
-                                        curv  = rm - 2*r0 + rp;
-                                        delta = zeros(nTrials, 1);
-                                        ok = inner & curv < 0;   % a genuine local maximum
-                                        delta(ok) = min(max(0.5 * (rm(ok) - rp(ok)) ./ curv(ok), -0.5), 0.5);
-                                        t0_frac_per_sensor(i,:,d_idx) = t(best_col) + delta*dt;
+                                        % Sub-sample t0_i: parabolic interpolation of the peak
+                                        t0_frac_per_sensor(i,:,d_idx) = t(best_col) + refine_peak(ratio, best_col)*dt;
                                     end
                                 end
 
@@ -651,10 +677,6 @@ for experiment_idx = 1:numel(experiment_list)
                                 t0_i_hat    = reshape(t0_frac_per_sensor, 1, S, nTrials, nDeployments);   % sub-sample
                                 alpha_i_hat = reshape(c_scalar_at_best ./ (G_scalar_at_best .* mi_sq), 1, S, nTrials, nDeployments);
 
-                                %% --- Median-of-sensors estimates
-                                alpha_estimates_trimmed = median(alpha_i_hat, 2);
-                                t0_estimates_trimmed    = median(t0_i_hat, 2);
-
                                 %% --- Robust outlier tests: flag if |x_i - median| / scale > k, where scale
                                 % is a robust std estimate: 1.4826*MAD, Sn or Qn (all consistent for Gaussian data).
                                 med_alpha = median(alpha_i_hat, 2);
@@ -678,12 +700,12 @@ for experiment_idx = 1:numel(experiment_list)
                                 z_t0    = z_t0_all{spread_names == detector_spread};
 
                                 %%% With alpha
-                                alpha_delta_k = 3;
+                                alpha_delta_k = 7;
                                 alpha_flagged = z_alpha > alpha_delta_k;
                                 flagged = flagged | alpha_flagged;
 
                                 %%% With t0
-                                t0_delta_k = 3;
+                                t0_delta_k = 7;
                                 t0_flagged = z_t0 > t0_delta_k;
                                 flagged = flagged | t0_flagged;
 
@@ -712,6 +734,52 @@ for experiment_idx = 1:numel(experiment_list)
                                 roc_n_atk(roc_idx{:}) = roc_n_atk(roc_idx{:}) + numel(corr_atk);
                                 roc_n_hon(roc_idx{:}) = roc_n_hon(roc_idx{:}) + numel(corr_hon);
 
+                                %% --- Conventional baselines from the per-sensor estimates (independent of the detector)
+                                % Rejection: conventional normalized-MAD rule, |x_i - median| / (1.4826*MAD) > conv_mad_k
+                                z_mad_alpha = z_alpha_all{spread_names == "mad"};
+                                z_mad_t0    = z_t0_all{spread_names == "mad"};
+                                keep_a = z_mad_alpha <= conv_mad_k;   % 1 x S x nTrials x D
+                                keep_t = z_mad_t0    <= conv_mad_k;
+                                if conv_rejection == "joint"
+                                    keep_a = keep_a & keep_t;
+                                    keep_t = keep_a;
+                                end
+                                none_kept_a = ~any(keep_a, 2);        % 1 x 1 x nTrials x D -> fall back to the median
+                                none_kept_t = ~any(keep_t, 2);
+                                % Precision (1/variance) of each per-sensor estimate, for the weighted skipped mean:
+                                %   alpha_i: G_i(tau_i) * m_i^4;   t0_i: G'_i(tau_i) * m_i^4 (the common alpha^2 cancels)
+                                prec_alpha = reshape(G_scalar_at_best  .* mi_sq.^2, 1, S, nTrials, nDeployments);
+                                prec_t0    = reshape(Gd_scalar_at_best .* mi_sq.^2, 1, S, nTrials, nDeployments);
+                                conv_alpha = struct();
+                                conv_t0    = struct();
+                                for cm = conventional_methods
+                                    switch cm
+                                        case "median"
+                                            a_est = med_alpha;
+                                            t_est = med_t0;
+                                        case "trimmed_mean"
+                                            assert(2*conv_trim < S, 'conv_trim = %d trims every sensor (S = %d).', conv_trim, S);
+                                            a_sorted = sort(alpha_i_hat, 2);
+                                            t_sorted = sort(t0_i_hat, 2);
+                                            a_est = mean(a_sorted(1, conv_trim+1:S-conv_trim, :, :), 2);
+                                            t_est = mean(t_sorted(1, conv_trim+1:S-conv_trim, :, :), 2);
+                                        case "skipped_mean"
+                                            a_est = sum(alpha_i_hat .* keep_a, 2) ./ sum(keep_a, 2);
+                                            t_est = sum(t0_i_hat    .* keep_t, 2) ./ sum(keep_t, 2);
+                                        case "skipped_wmean"
+                                            w_a = prec_alpha .* keep_a;
+                                            w_t = prec_t0    .* keep_t;
+                                            a_est = sum(w_a .* alpha_i_hat, 2) ./ sum(w_a, 2);
+                                            t_est = sum(w_t .* t0_i_hat,    2) ./ sum(w_t, 2);
+                                    end
+                                    if startsWith(cm, "skipped")   % no sensor kept -> fall back to the median
+                                        a_est(none_kept_a) = med_alpha(none_kept_a);
+                                        t_est(none_kept_t) = med_t0(none_kept_t);
+                                    end
+                                    conv_alpha.(char(cm)) = a_est;   % 1 x 1 x nTrials x nDeployments
+                                    conv_t0.(char(cm))    = t_est;
+                                end
+
                                 %% Nominal estimation using multiple receive antennas
                                 % The t0 search and the alpha estimate are both linear in the per-branch
                                 % filtered data, so build v = sum_m b_m*z_m*Qn_m once (Qn_m and Q_sum are
@@ -725,11 +793,16 @@ for experiment_idx = 1:numel(experiment_list)
 
                                 mf_t0 = pagemtimes(v, D_template);
                                 [~, I] = max(mf_t0(:, offset_idx:end, :), [], 2);
-                                t0_col = I + offset_idx - 1;
-                                t0_estimates_for_plot = reshape(t(t0_col), 1, 1, nTrials, nDeployments);
+                                t0_col = I + offset_idx - 1;   % grid peak, nTrials x 1 x D
+                                % Sub-sample t0_hat: parabolic interpolation of the peak (same step as the per-sensor t0_i)
+                                t0_delta = zeros(size(t0_col));
+                                for d_idx = 1:nDeployments
+                                    t0_delta(:, 1, d_idx) = refine_peak(mf_t0(:, :, d_idx), t0_col(:, 1, d_idx));
+                                end
+                                t0_estimates_for_plot = reshape(t(t0_col) + t0_delta*dt, 1, 1, nTrials, nDeployments);
 
-                                % Alpha given t0. Joint (default): t0_hat lies on the grid, so rho(t - t0_hat)
-                                % is a column of D_template. Otherwise: the true t0.
+                                % Alpha given t0. Joint (default): rho(t - t0_hat) at the grid peak, a column of
+                                % D_template (alpha uses the grid peak, as the per-sensor alpha_i does). Otherwise: the true t0.
                                 if alpha_uses_true_t0
                                     Y_true = dt*ifft(fft(sensor_signal(t - t0_true, Tp, norm_fact), N, 1) .* mfTemplateFFT_raw);
                                     Rss    = repmat(Y_true(round(Tp/dt)+1 : round(Tp/dt)+K).', nTrials, 1, nDeployments);   % nTrials x K x D
@@ -829,7 +902,9 @@ for experiment_idx = 1:numel(experiment_list)
                                 rho_empirical_mse_full_honest(slot{:}) = full_honest_mse;
                                 rho_empirical_mse_undefended(slot{:})  = alpha_t0_mse(alpha_estimates_undefended, t0_estimates_undefended, alpha_true, t0_true);
                                 rho_empirical_mse_oracle(slot{:})      = alpha_t0_mse(alpha_estimates_oracle,     t0_estimates_oracle,     alpha_true, t0_true);
-                                rho_empirical_mse_trimmed(slot{:})     = alpha_t0_mse(alpha_estimates_trimmed,    t0_estimates_trimmed,    alpha_true, t0_true);
+                                for cm = conventional_methods
+                                    rho_mse_conv.(char(cm))(slot{:}) = alpha_t0_mse(conv_alpha.(char(cm)), conv_t0.(char(cm)), alpha_true, t0_true);
+                                end
                                 if attack_type == "none"
                                     rho_crlb_oracle(slot{:}) = crlb_pair;          % no one to remove: oracle bound = full-array bound
                                 else
@@ -868,7 +943,6 @@ for experiment_idx = 1:numel(experiment_list)
         avg_dep_mse_undefended = rho_empirical_mse_undefended;
         avg_dep_mse_oracle = rho_empirical_mse_oracle;   % (or mean(...) branch, matching the existing if/else)
         avg_dep_mse_full_honest = rho_empirical_mse_full_honest;
-        avg_dep_mse_trimmed = rho_empirical_mse_trimmed;
         % avg_dep_mse_basis_supp = rho_empirical_mse_basis_supp;
         avg_dep_crlb_oracle = rho_crlb_oracle;
     else
@@ -879,25 +953,31 @@ for experiment_idx = 1:numel(experiment_list)
         avg_dep_mse_undefended = mean(rho_empirical_mse_undefended,length(size(rho_empirical_mse_undefended)));
         avg_dep_mse_oracle = mean(rho_empirical_mse_oracle,length(size(rho_empirical_mse_oracle)));   % (or mean(...) branch, matching the existing if/else)
         avg_dep_mse_full_honest = mean(rho_empirical_mse_full_honest,length(size(rho_empirical_mse_full_honest)));
-        avg_dep_mse_trimmed = mean(rho_empirical_mse_trimmed,length(size(rho_empirical_mse_trimmed)));
         % avg_dep_mse_basis_supp = mean(rho_empirical_mse_basis_supp,length(size(rho_empirical_mse_basis_supp)));
         avg_dep_crlb_oracle = mean(rho_crlb_oracle,length(size(rho_crlb_oracle)));
     end
 
-    txt_list = ["undefended", "oracle", "full_honest", "trimmed"]; % , "basis_supp"];
+    avg_dep_mse_conv = struct();   % conventional baselines, one field per method
+    for cm = conventional_methods
+        avg_dep_mse_conv.(char(cm)) = mean(rho_mse_conv.(char(cm)), 8);   % dim 8 = deployments
+    end
+
+    txt_list = ["undefended", "oracle", "full_honest"]; % , "basis_supp"];
     save_images = false;
 
     files_to_save = ["avg_dep_mse_" + txt_list, "avg_dep_var", "avg_dep_mse", "avg_dep_bias", "avg_dep_crlb", "avg_dep_crlb_oracle",...
         "agent_db_values", "channel_snr", "selected_schemes", "sensor_vals", "channel_db_values",...
         "experiment", "sensor_dimension", "save_images", "K", "nDeployments", "nDeployments_total", "constraints", "transforms", "coeff_types", "approaches",...
         "iter_arr", "iter_length", "all_strats", "num_strats", "save_images", "alpha_uses_true_t0",...
-        "T0", "Tp", "alpha_true", "t0_true", "pivot_vals", "Mtot", "N", "S", "S_max","attacks", "attacker_enabled"];
+        "T0", "Tp", "alpha_true", "t0_true", "pivot_vals", "Mtot", "N", "S", "S_max","attacks", "attacker_enabled", ...
+        "avg_dep_mse_conv", "conventional_methods", "conv_trim", "conv_mad_k", "conv_rejection"];
     
     save(experiment + "_results.mat", files_to_save{:})
 
     %% Compile per-attack summary (first strategy / scheme / agent SNR / sensor count)
-    method_names = ["defended", "undefended", "oracle", "full_honest", "trimmed"];
-    method_data  = {avg_dep_mse, avg_dep_mse_undefended, avg_dep_mse_oracle, avg_dep_mse_full_honest, avg_dep_mse_trimmed};
+    method_names = ["defended", "undefended", "oracle", "full_honest", conventional_methods];
+    method_data  = [{avg_dep_mse, avg_dep_mse_undefended, avg_dep_mse_oracle, avg_dep_mse_full_honest}, ...
+        cellfun(@(f) avg_dep_mse_conv.(f), cellstr(conventional_methods), 'UniformOutput', false)];
     rows = {};
     for p = 1:numel(pivot_vals)
         for c = 1:size(channel_db_values, 2)

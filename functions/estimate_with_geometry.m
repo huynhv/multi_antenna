@@ -2,7 +2,8 @@ function [alpha_hat, t0_hat, Lambda_hat] = estimate_with_geometry(geom, y, K, N,
     t, t0_true, mfTemplateFFT_raw, D_template, trial_idx, d_idx, dt, offset_idx, alpha_uses_true_t0)
 % Applies a PRECOMPUTED geometry to the selected trials -- no eig, no null-space
 % construction, no get_time_domain here.
-%   alpha_uses_true_t0 = false: joint estimation, alpha evaluated at each trial's t0_hat
+%   t0_hat is refined to a fraction of a sample (refine_peak), like the main estimator.
+%   alpha_uses_true_t0 = false: joint estimation, alpha evaluated at each trial's t0_hat grid peak
 %   alpha_uses_true_t0 = true : alpha evaluated at the true t0
 
 n_ret = numel(trial_idx);
@@ -22,8 +23,8 @@ end
 % t0 search over the same window as the main estimator.
 mf = v * D_template;                                 % n_ret x K
 [~, I] = max(mf(:, offset_idx:end), [], 2);
-col = I + offset_idx - 1;                            % n_ret x 1
-t0_hat = reshape(t(col), 1, 1, n_ret);
+col = I + offset_idx - 1;                            % n_ret x 1, grid peak
+t0_hat = reshape(t(col) + refine_peak(mf, col)*dt, 1, 1, n_ret);   % sub-sample (parabolic peak interpolation)
 
 if alpha_uses_true_t0
     Y = dt*ifft(fft(sensor_signal(t - t0_true, Tp, norm_fact), N, 1) .* mfTemplateFFT_raw);
