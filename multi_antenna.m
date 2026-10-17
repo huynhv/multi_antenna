@@ -121,6 +121,13 @@ t0_attacker   = 3;     % "time shift": attacker's pulse is moved to start at t0_
 ts_delta     = dt;                                % Delta = one sample
 ts_multiples = [0.25 0.5 1 2 4 8 16 32 64];       % n
 
+% Attacker-count experiment (experiment_list = "attacker_count"): DETECTION ONLY (Pd/Pf, ROC counts,
+% no estimation) at one agent SNR and one channel SNR, with sensors 1..n compromised for each n.
+ac_counts      = 1:5;
+ac_attacks     = ["noise", "sinusoid", "peak", "flip", "time shift"];
+ac_agent_db    = 0;     % agent SNR (dB)
+ac_channel_snr = 5;     % channel SNR (dB)
+
 % Spread estimator used by the per-sensor alpha/t0 outlier tests IN THE DETECTOR (all three are
 % always computed for the ROC): "mad" (1.4826*MAD), "sn" or "qn" (Rousseeuw-Croux).
 detector_spread = "qn";
@@ -194,7 +201,7 @@ Hm_arr = @(w, lambda) zeroIfnan(Hm_arr_internal(w, lambda)) + (w == Bee | w == -
 % t0_branch_fisher = @(bm, lambda) integral(@(w) bm.^2 .* (w .* mag_sqr_S0(w)).^2 ./ Vm_arr(w, lambda), -Inf, Inf, 'ArrayValued', true);
 
 %% Define experiment list
-experiment_list = "time_shift_sensitivity";   % and/or "multi_antenna_base", "time_shift_sensitivity"
+experiment_list = "attacker_count";   % any of "multi_antenna_base", "time_shift_sensitivity", "attacker_count"
 
 for experiment_idx = 1:numel(experiment_list)
     experiment = experiment_list(experiment_idx);
@@ -221,8 +228,23 @@ for experiment_idx = 1:numel(experiment_list)
     end
 
     % Each sweep entry ("pivot") has a label (pivot_vals, used in tables and plots), an attack type
-    % (pivot_types) and, for time shifts, the shift in seconds (pivot_shift).
-    if experiment == "time_shift_sensitivity"
+    % (pivot_types), for time shifts the shift in seconds (pivot_shift), and its compromised sensors
+    % (pivot_atk, with pivot_n of them). detection_only skips all estimation (Pd/Pf and ROC counts only).
+    detection_only = false;
+    if experiment == "attacker_count"
+        agent_db_values = ac_agent_db;
+        channel_snr     = ac_channel_snr;
+        [n_grid, type_grid] = ndgrid(ac_counts, ac_attacks);   % every (n, attack) pair, n varying fastest
+        attacks     = ["none", reshape(type_grid + ", " + compose("%d", n_grid) + " atk", 1, [])];
+        pivot_types = ["none", reshape(type_grid, 1, [])];
+        pivot_n     = [0, reshape(n_grid, 1, [])];
+        pivot_atk   = arrayfun(@(nn) 1:nn, pivot_n, 'UniformOutput', false);   % sensors 1..n
+        pivot_shift = nan(size(attacks));
+        pivot_shift(pivot_types == "time shift") = t0_attacker - t0_true;
+        detection_only = true;
+        log_msg(verbosity_level, 1, 'Attacker count (detection only): n = %s, agent SNR %g dB, channel SNR %g dB, %d sweep entries', ...
+            mat2str(ac_counts), ac_agent_db, ac_channel_snr, numel(attacks));
+    elseif experiment == "time_shift_sensitivity"
         ts_shift_s   = ts_multiples * ts_delta;          % shift of each attack (s)
         ts_shift_pct = 100 * ts_shift_s / t0_true;       % ... as a percentage of t0_true
         attacks      = ["none", "time shift " + compose("%g", ts_multiples) + "dt"];
@@ -237,6 +259,10 @@ for experiment_idx = 1:numel(experiment_list)
         pivot_types = attacks;
         pivot_shift = nan(size(attacks));
         pivot_shift(attacks == "time shift") = t0_attacker - t0_true;
+    end
+    if experiment ~= "attacker_count"   % every other mode: the fixed attacker set attacker_idx
+        pivot_atk = repmat({attacker_idx}, 1, numel(attacks));
+        pivot_n   = repmat(numel(attacker_idx), 1, numel(attacks));
     end
     pivot_vals = attacks;
     
@@ -288,6 +314,9 @@ for experiment_idx = 1:numel(experiment_list)
     det_size = [numel(pivot_vals), size(channel_db_values,2), length(agent_db_values), sensor_dimension];
     det_tp = zeros(det_size);  det_fp = zeros(det_size);  det_fn = zeros(det_size);
     fp_rate_combined = zeros(det_size);   % honest-sensor false-flag rate
+    det_all_caught = zeros(det_size);     % trials in which every compromised sensor was flagged
+    det_any_fa     = zeros(det_size);     % trials in which at least one honest sensor was flagged
+    det_ntrials    = zeros(det_size);     % trials counted (trials x deployments)
 
     % ROC (Pd vs Pf): per-sensor flag counts with each test's OWN threshold swept over its
     % natural range (no normalization). The +/-Inf end points flag every sensor / none, so
@@ -400,10 +429,14 @@ for experiment_idx = 1:numel(experiment_list)
                 [~, ui_no_attack] = mf_integral_fft(noisy_unified_xi, mi_5d .* sensor_signal(t, Tp, norm_fact), 1, 1, K, dt, Tp);
 
                 %% What each attack makes the compromised sensors transmit in place of their honest ui
-                atk = attacker_idx(attacker_idx <= S);
-                ui_honest_atk = ui_no_attack(:,atk,:,:,:);
-                ui_atk_by_attack = cell(numel(pivot_vals), 1);
+                atk_by_pivot       = cell(numel(pivot_vals), 1);   % compromised sensors of each sweep entry
+                ui_honest_by_pivot = cell(numel(pivot_vals), 1);   % ... and their honest ui
+                ui_atk_by_attack   = cell(numel(pivot_vals), 1);
                 for pivot_idx = 1:numel(pivot_vals)
+                    atk = pivot_atk{pivot_idx}(pivot_atk{pivot_idx} <= S);
+                    ui_honest_atk = ui_no_attack(:,atk,:,:,:);
+                    atk_by_pivot{pivot_idx}       = atk;
+                    ui_honest_by_pivot{pivot_idx} = ui_honest_atk;
                     switch pivot_types(pivot_idx)
                         case "flip"              % -alpha*m_i^2*rho(t-t0) - w_i(t)
                             ui_atk_by_attack{pivot_idx} = -ui_honest_atk;
@@ -441,7 +474,10 @@ for experiment_idx = 1:numel(experiment_list)
                     combine = @(u, g_sub) reshape(pagemtimes(reshape(u, K, size(u,2), nTrials, nDeployments), ...
                         reshape(g_sub, size(u,2), num_antennas, 1, nDeployments)), K, 1, num_antennas, nTrials, nDeployments);
                     out_cws_no_attack  = combine(ui_no_attack, g_tilde);
-                    out_cws_honest_atk = combine(ui_honest_atk, g_tilde(:,atk,:,:,:));   % compromised sensors' honest share
+                    out_cws_honest_atk = cell(numel(pivot_vals), 1);   % compromised sensors' honest share, per sweep entry
+                    for pivot_idx = 1:numel(pivot_vals)
+                        out_cws_honest_atk{pivot_idx} = combine(ui_honest_by_pivot{pivot_idx}, g_tilde(:,atk_by_pivot{pivot_idx},:,:,:));
+                    end
 
                     %% Channel-independent whitening basis (eigenvalues rescaled per channel SNR below)
                     m = reshape(mi_5d, S, nDeployments);                   % S x nDeployments
@@ -516,7 +552,8 @@ for experiment_idx = 1:numel(experiment_list)
                         y_no_attack = pagetranspose(out_cws_no_attack + scaled_n);   % SAME noise draw as every attacked y below
 
                         %% ---- Attack-independent quantities for this channel SNR (computed once) ----
-                        if use_W
+                        % (estimation only -- skipped entirely in detection-only experiments)
+                        if use_W && ~detection_only
                             lambda_vals = (2/gamma_n) * lambda_B_base;               % 2M x nDeployments
                             W           = (1/sqrt(0.5*gamma_n)) * UB_transpose;      % 2M x 2M x nDeployments
                             W_bcast     = reshape(W, Mtot, Mtot, 1, nDeployments);
@@ -560,7 +597,7 @@ for experiment_idx = 1:numel(experiment_list)
                                 t0_term_oracle    = integral(@(w) sum(WG_Rmu_oracle.^2 .* (w.^2) .* mag_sqr_S0(w).^2 ./ (lambda_vals_oracle.*mag_sqr_S0(w)+1), 1), -Inf, Inf, 'ArrayValued', true);
                                 crlb_oracle_pair = [2*pi ./ alpha_term_oracle; 2*pi ./ (alpha_true^2 .* t0_term_oracle)];
                             end
-                        else
+                        elseif ~use_W   % single-antenna baseline
                             ci = real(reshape(g_tilde, 1, S, 1, nDeployments));
                             crlb_pair = [reshape(alpha_objective_array(1, mi_4d, ci), 1, []);
                                          reshape(t0_objective_array(1, mi_4d, ci, alpha_true), 1, [])];
@@ -573,6 +610,7 @@ for experiment_idx = 1:numel(experiment_list)
                             attack_start = tic;
 
                             % Ground-truth compromised set for this run (empty when there is no attack).
+                            atk = atk_by_pivot{pivot_idx};
                             if attack_type == "none"
                                 true_atk = [];
                             else
@@ -580,7 +618,7 @@ for experiment_idx = 1:numel(experiment_list)
                             end
 
                             if attacker_enabled && attack_type ~= "none"
-                                out_cws = out_cws_no_attack - out_cws_honest_atk + combine(ui_atk_by_attack{pivot_idx}, g_tilde(:,atk,:,:,:));
+                                out_cws = out_cws_no_attack - out_cws_honest_atk{pivot_idx} + combine(ui_atk_by_attack{pivot_idx}, g_tilde(:,atk,:,:,:));
                             else
                                 out_cws = out_cws_no_attack;
                             end
@@ -758,6 +796,29 @@ for experiment_idx = 1:numel(experiment_list)
 
                                 roc_n_atk(roc_idx{:}) = roc_n_atk(roc_idx{:}) + numel(corr_atk);
                                 roc_n_hon(roc_idx{:}) = roc_n_hon(roc_idx{:}) + numel(corr_hon);
+
+                                % Per-trial detection outcomes of the combined detector
+                                n_flag_atk = sum(flagged(1, is_atk, :, :), 2);    % 1 x 1 x nTrials x D: attackers flagged
+                                n_flag_hon = sum(flagged(1, ~is_atk, :, :), 2);   % honest sensors flagged
+                                det_all_caught(roc_idx{:}) = det_all_caught(roc_idx{:}) + sum(n_flag_atk == numel(true_atk), 'all');
+                                det_any_fa(roc_idx{:})     = det_any_fa(roc_idx{:})     + sum(n_flag_hon > 0, 'all');
+                                det_ntrials(roc_idx{:})    = det_ntrials(roc_idx{:})    + nTrials*nDeployments;
+
+                                if detection_only
+                                    % Detection-only experiment: outcomes straight from the flags, no nulling/estimation
+                                    tp_total = sum(n_flag_atk, 'all');
+                                    fn_total = numel(true_atk)*nTrials*nDeployments - tp_total;
+                                    fp_total = sum(n_flag_hon, 'all');
+                                    det_tp(roc_idx{:}) = det_tp(roc_idx{:}) + tp_total;
+                                    det_fp(roc_idx{:}) = det_fp(roc_idx{:}) + fp_total;
+                                    det_fn(roc_idx{:}) = det_fn(roc_idx{:}) + fn_total;
+                                    fp_rate_combined(roc_idx{:}) = fp_rate_combined(roc_idx{:}) + ...
+                                        mean(flagged(1, ~is_atk, :, :), 'all') * nDeployments / nDeployments_total;
+                                    attack_time = toc(attack_start);
+                                    log_msg(verbosity_level, 3, 'Attack "%s" (detection only): TP=%d, FP=%d, FN=%d, %.1fs', ...
+                                        attack_label, tp_total, fp_total, fn_total, attack_time);
+                                    continue   % skip the conventional baselines, estimation, nulling and MSE storage
+                                end
 
                                 %% --- Conventional baselines from the per-sensor estimates (independent of the detector)
                                 % Rejection: conventional normalized-MAD rule, |x_i - median| / (1.4826*MAD) > conv_mad_k
@@ -1007,27 +1068,45 @@ for experiment_idx = 1:numel(experiment_list)
     save(experiment + "_results.mat", files_to_save{:})
     if experiment == "time_shift_sensitivity"
         save(experiment + "_results.mat", "ts_delta", "ts_multiples", "ts_shift_s", "ts_shift_pct", "-append");
+    elseif experiment == "attacker_count"
+        save(experiment + "_results.mat", "ac_counts", "ac_attacks", "ac_agent_db", "ac_channel_snr", "-append");
     end
 
-    %% Compile per-attack summary (first strategy / scheme / agent SNR / sensor count)
-    method_names = ["defended", "undefended", "oracle", "full_honest", conventional_methods];
-    method_data  = [{avg_dep_mse, avg_dep_mse_undefended, avg_dep_mse_oracle, avg_dep_mse_full_honest}, ...
-        cellfun(@(f) avg_dep_mse_conv.(f), cellstr(conventional_methods), 'UniformOutput', false)];
-    rows = {};
-    for p = 1:numel(pivot_vals)
-        for c = 1:size(channel_db_values, 2)
-            row = {pivot_vals(p), channel_db_values(1,c,1)};
-            for mth = 1:numel(method_data)
-                row = [row, {method_data{mth}(1,1,c,1,1,p,1), method_data{mth}(1,1,c,2,1,p,1)}];
+    if ~detection_only
+        %% Compile per-attack summary (first strategy / scheme / agent SNR / sensor count)
+        method_names = ["defended", "undefended", "oracle", "full_honest", conventional_methods];
+        method_data  = [{avg_dep_mse, avg_dep_mse_undefended, avg_dep_mse_oracle, avg_dep_mse_full_honest}, ...
+            cellfun(@(f) avg_dep_mse_conv.(f), cellstr(conventional_methods), 'UniformOutput', false)];
+        rows = {};
+        for p = 1:numel(pivot_vals)
+            for c = 1:size(channel_db_values, 2)
+                row = {pivot_vals(p), channel_db_values(1,c,1)};
+                for mth = 1:numel(method_data)
+                    row = [row, {method_data{mth}(1,1,c,1,1,p,1), method_data{mth}(1,1,c,2,1,p,1)}];
+                end
+                rows(end+1,:) = [row, {det_tp(p,c,1,1), det_fp(p,c,1,1), det_fn(p,c,1,1), fp_rate_combined(p,c,1,1)}];
             end
-            rows(end+1,:) = [row, {det_tp(p,c,1,1), det_fp(p,c,1,1), det_fn(p,c,1,1), fp_rate_combined(p,c,1,1)}];
         end
+        var_names = ["attack", "channel_snr_db", reshape(method_names + ["_mse_alpha"; "_mse_t0"], 1, []), "TP", "FP", "FN", "honest_fp_rate"];
+        summary_tbl = cell2table(rows, 'VariableNames', cellstr(var_names));
+        disp(summary_tbl)
+        writetable(summary_tbl, experiment + "_summary.csv");
+    else
+        %% Detection-only summary: combined detector per sweep entry (first channel SNR / agent SNR / sensor count)
+        c = 1;
+        n_comp  = pivot_n(:);
+        pd_comb = det_tp(:,c,1,1) ./ (det_tp(:,c,1,1) + det_fn(:,c,1,1));   % NaN for "none"
+        pf_comb = det_fp(:,c,1,1) ./ roc_n_hon(:,c,1,1);
+        p_all   = det_all_caught(:,c,1,1) ./ det_ntrials(:,c,1,1);
+        p_all(n_comp == 0) = NaN;                                           % nothing to catch without attackers
+        p_fa    = det_any_fa(:,c,1,1) ./ det_ntrials(:,c,1,1);
+        summary_tbl = table(pivot_vals(:), pivot_types(:), n_comp, pd_comb, pf_comb, p_all, p_fa, ...
+            'VariableNames', {'entry', 'attack', 'n_attackers', 'Pd', 'Pf', 'P_all_caught', 'P_any_false_flag'});
+        disp(summary_tbl)
+        writetable(summary_tbl, experiment + "_detection.csv");
     end
-    var_names = ["attack", "channel_snr_db", reshape(method_names + ["_mse_alpha"; "_mse_t0"], 1, []), "TP", "FP", "FN", "honest_fp_rate"];
-    summary_tbl = cell2table(rows, 'VariableNames', cellstr(var_names));
-    disp(summary_tbl)
-    writetable(summary_tbl, experiment + "_summary.csv");
     save(experiment + "_results.mat", "summary_tbl", "det_tp", "det_fp", "det_fn", "fp_rate_combined", ...
+        "det_all_caught", "det_any_fa", "det_ntrials", "pivot_n", "pivot_atk", "detection_only", ...
         "roc_corr_grid", "roc_k_grid", "roc_spread_names", "detector_spread", "roc_corr_det", "roc_corr_fa", ...
         "roc_alpha_det", "roc_alpha_fa", "roc_t0_det", "roc_t0_fa", "roc_n_atk", "roc_n_hon", ...
         "corr_min", "alpha_delta_k", "t0_delta_k", "mad_scale", "-append");   % current operating point
