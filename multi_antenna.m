@@ -8,12 +8,12 @@ addpath('.\functions')
 verbosity_level = 5;   % 1 = major sections only, 2 = + sub-steps/channel-SNR, 3 = + diagnostics
 
 % Set seed for reproducibility
-seed = 264;
+seed = 22;
 rng(seed);
 
 use_W = true;
 
-nDeployments_total = 100;   % total deployments to simulate
+nDeployments_total = 20;   % total deployments to simulate
 dep_batch_size     = 10; % 10;    % deployments held in memory at once (~3-4 GB per batch of 10)
 % Set the number of measurements per sensor, starting from 0
 K = 301;
@@ -112,7 +112,8 @@ attacker_db      = 0;      % attacker "SNR", same convention as agent_db (see be
 attacker_seed = 42;
 % Attack-specific parameters (each is used only by its attack type)
 attacker_beta = 0.1;   % "amplitude scale": attacker transmits beta * u_i(t)
-t0_attacker   = 3;     % "time shift": attacker's pulse is moved to start at t0_attacker
+inside_edge_time_val = T0-Tp;
+t0_attacker   = inside_edge_time_val;     % "time shift": attacker's pulse is moved to start at t0_attacker
 
 % Time-shift sensitivity experiment (experiment_list = "time_shift_sensitivity"): one time-shift attack
 % per multiple n, with the attacker's pulse moved to t0_true + n*ts_delta. A no-attack reference
@@ -201,7 +202,7 @@ Hm_arr = @(w, lambda) zeroIfnan(Hm_arr_internal(w, lambda)) + (w == Bee | w == -
 % t0_branch_fisher = @(bm, lambda) integral(@(w) bm.^2 .* (w .* mag_sqr_S0(w)).^2 ./ Vm_arr(w, lambda), -Inf, Inf, 'ArrayValued', true);
 
 %% Define experiment list
-experiment_list = "attacker_count";   % any of "multi_antenna_base", "time_shift_sensitivity", "attacker_count"
+experiment_list = "multi_antenna_base";   % any of "multi_antenna_base", "time_shift_sensitivity", "attacker_count"
 
 for experiment_idx = 1:numel(experiment_list)
     experiment = experiment_list(experiment_idx);
@@ -215,7 +216,7 @@ for experiment_idx = 1:numel(experiment_list)
     channel_snr = linspace(0,10,5);
 
     % Attacks to test -- each runs the full Monte Carlo sweep. Valid names are listed below.
-    attacks = ["none", "noise", "sinusoid", "peak", "flip", "time shift"]; % ["none", "noise", "sinusoid", "peak", "flip", "time shift"];
+    attacks = ["time shift"];
 
     valid_attacks = ["none", "noise", "sinusoid", "peak", "flip", "time shift", "amplitude scale"];
     attacks = unique(attacks, 'stable');   % no duplicate runs
@@ -376,7 +377,7 @@ for experiment_idx = 1:numel(experiment_list)
 
                 case "peak"
                     peak_same_location = false;
-                    candidate_locs = t(2:end);   % the two worst-case candidates identified earlier
+                    candidate_locs = t0_attacker; % t(2:end);   % the two worst-case candidates identified earlier
                     if peak_same_location
                         peak_loc = repmat(candidate_locs(randi(numel(candidate_locs))), 1, S_max);
                     else
@@ -1056,12 +1057,11 @@ for experiment_idx = 1:numel(experiment_list)
     end
 
     txt_list = ["undefended", "oracle", "full_honest"]; % , "basis_supp"];
-    save_images = false;
 
     files_to_save = ["avg_dep_mse_" + txt_list, "avg_dep_var", "avg_dep_mse", "avg_dep_bias", "avg_dep_crlb", "avg_dep_crlb_oracle",...
         "agent_db_values", "channel_snr", "selected_schemes", "sensor_vals", "channel_db_values",...
-        "experiment", "sensor_dimension", "save_images", "K", "nDeployments", "nDeployments_total", "constraints", "transforms", "coeff_types", "approaches",...
-        "iter_arr", "iter_length", "all_strats", "num_strats", "save_images", "alpha_uses_true_t0",...
+        "experiment", "sensor_dimension", "K", "nDeployments", "nDeployments_total", "constraints", "transforms", "coeff_types", "approaches",...
+        "iter_arr", "iter_length", "all_strats", "num_strats", "alpha_uses_true_t0",...
         "T0", "Tp", "alpha_true", "t0_true", "pivot_vals", "Mtot", "N", "S", "S_max","attacks", "attacker_enabled", "pivot_types", "pivot_shift", "batch_time", "runtime", ...
         "avg_dep_mse_conv", "conventional_methods", "conv_trim", "conv_mad_k", "conv_rejection"];
     
@@ -1110,6 +1110,6 @@ for experiment_idx = 1:numel(experiment_list)
         "roc_corr_grid", "roc_k_grid", "roc_spread_names", "detector_spread", "roc_corr_det", "roc_corr_fa", ...
         "roc_alpha_det", "roc_alpha_fa", "roc_t0_det", "roc_t0_fa", "roc_n_atk", "roc_n_hon", ...
         "corr_min", "alpha_delta_k", "t0_delta_k", "mad_scale", "-append");   % current operating point
-    
+
     %% Plotting placeholder
 end
