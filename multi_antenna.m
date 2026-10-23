@@ -114,6 +114,15 @@ attacker_seed = 42;
 attacker_beta = 0.1;   % "amplitude scale": attacker transmits beta * u_i(t)
 inside_edge_time_val = T0-Tp;
 t0_attacker   = inside_edge_time_val;     % "time shift": attacker's pulse is moved to start at t0_attacker
+% Attack model for the waveform attacks ("noise", "sinusoid", "peak"):
+%   true  (in-band, measurement falsification): the waveform is the compromised agent's spoofed OBSERVATION
+%         x_i(t); the agent still follows the transmit protocol, so it sends the matched-filter output of
+%         x_i, which is confined to the honest signal band (same spectrum |S0|^2 as honest data).
+%   false (broadband): the waveform is injected directly as the transmitted u_i(t), bypassing the matched
+%         filter (energy across the whole sampled band).
+% Either way the transmitted waveform is normalized to the same energy, so only its spectrum differs.
+% "flip", "amplitude scale" and "time shift" transform the honest u_i and are in-band in both models.
+attack_inband = true;
 
 % Time-shift sensitivity experiment (experiment_list = "time_shift_sensitivity"): one time-shift attack
 % per multiple n, with the attacker's pulse moved to t0_true + n*ts_delta. A no-attack reference
@@ -210,6 +219,8 @@ for experiment_idx = 1:numel(experiment_list)
     pad_str = '----------';
     msg = [pad_str  ' ' 'Running: ' char(experiment) ' ' pad_str];
     log_msg(verbosity_level, 1, '%s', msg);
+    atk_model_str = ["broadband (injected directly as u_i)", "in-band (spoofed observation, matched-filtered)"];
+    log_msg(verbosity_level, 1, 'Waveform attack model: %s', atk_model_str(attack_inband + 1));
 
     % Configure strategies
     agent_db_values = 0;
@@ -392,6 +403,9 @@ for experiment_idx = 1:numel(experiment_list)
 
                 otherwise   % "flip", "amplitude scale", "time shift" transform the honest ui instead
                     wf = [];
+            end
+            if ~isempty(wf) && attack_inband   % spoofed observation -> the agent transmits its matched-filter output
+                [~, wf] = mf_integral_fft(wf, sensor_signal(t, Tp, norm_fact), 1, 1, K, dt, Tp);
             end
             if ~isempty(wf)   % normalize to unit total (dt-weighted) energy per slot
                 wf = wf ./ sqrt(sum(wf(:,:,1,1,1).^2, 1) * dt);
@@ -1063,7 +1077,7 @@ for experiment_idx = 1:numel(experiment_list)
         "experiment", "sensor_dimension", "K", "nDeployments", "nDeployments_total", "constraints", "transforms", "coeff_types", "approaches",...
         "iter_arr", "iter_length", "all_strats", "num_strats", "alpha_uses_true_t0",...
         "T0", "Tp", "alpha_true", "t0_true", "pivot_vals", "Mtot", "N", "S", "S_max","attacks", "attacker_enabled", "pivot_types", "pivot_shift", "batch_time", "runtime", ...
-        "avg_dep_mse_conv", "conventional_methods", "conv_trim", "conv_mad_k", "conv_rejection"];
+        "avg_dep_mse_conv", "conventional_methods", "conv_trim", "conv_mad_k", "conv_rejection", "attack_inband"];
     
     save(experiment + "_results.mat", files_to_save{:})
     if experiment == "time_shift_sensitivity"
