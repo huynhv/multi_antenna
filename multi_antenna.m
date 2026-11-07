@@ -130,6 +130,7 @@ attack_inband = true;
 % smooth matched-filter output in shift_waveform).
 ts_delta     = dt;                                % Delta = one sample
 ts_multiples = [0.25 0.5 1 2 4 8 16 32 64];       % n
+ts_channel_snr = 5;                               % channel SNR(s) (dB)
 
 % Attacker-count experiment (experiment_list = "attacker_count"): DETECTION ONLY (Pd/Pf, ROC counts,
 % no estimation) at one agent SNR and one channel SNR, with sensors 1..n compromised for each n.
@@ -137,6 +138,26 @@ ac_counts      = 1:5;
 ac_attacks     = ["noise", "sinusoid", "peak", "flip", "time shift"];
 ac_agent_db    = 0;     % agent SNR (dB)
 ac_channel_snr = 5;     % channel SNR (dB)
+
+% Imperfect-CSI experiment (experiment_list = "csi_sensitivity"): the agents transmit exactly as with
+% perfect CSI (same pre-compensation, same received signal); only the fusion center's knowledge of the
+% effective (pre-compensated) channel H is imperfect. It uses the LS pilot estimate
+%   H_hat = H + E,   E ~ CN(0, eps) independent of H,   eps = 10^(NMSE/10)   (fixed NMSE per coefficient)
+% in every fusion-center step (whitening, per-sensor isolation projectors, nulling geometries of the
+% full-honest / oracle / defended estimators). Plugging H_hat in as if it were exact biases amplitude
+% estimates slightly low (errors-in-variables); delay estimates and detection are unaffected by this bias.
+% The CRLBs stay on the true channel (perfect-CSI reference). CSI is estimated once per deployment (block
+% fading: every trial of a deployment shares the same estimate). One run and one results file per CSI level
+% (csi_sensitivity_nmse<level>dB_results.mat, csi_sensitivity_perfect_results.mat for -Inf).
+csi_nmse_db_list   = [-Inf -30 -25 -20 -15];   % CSI NMSE levels (dB); -Inf = perfect CSI. Nominal range for
+                                               % one-shot pilot estimation (about 10+ pilots at 5-10 dB SNR)
+csi_attacks        = ["noise"];
+csi_agent_db       = 0;        % agent SNR (dB)
+csi_channel_snr    = 5;        % channel SNR(s) (dB)
+csi_detection_only = false;    % true: Pd/Pf and ROC counts only (much faster)
+csi_seed           = 7;        % CSI-error draws use their own stream: channels, noise and attacks are
+                               % identical across CSI levels (paired comparisons)
+csi_nmse_db_default = -Inf;    % CSI quality used by every OTHER experiment (-Inf = perfect CSI)
 
 % Spread estimator used by the per-sensor alpha/t0 outlier tests IN THE DETECTOR (all three are
 % always computed for the ROC): "mad" (1.4826*MAD), "sn" or "qn" (Rousseeuw-Croux).
@@ -210,17 +231,54 @@ Hm_arr = @(w, lambda) zeroIfnan(Hm_arr_internal(w, lambda)) + (w == Bee | w == -
 % alpha_branch_fisher = @(bm, lambda) integral(@(w) bm.^2 .* mag_sqr_S0(w).^2 ./ Vm_arr(w, lambda), -Inf, Inf, 'ArrayValued', true);
 % t0_branch_fisher = @(bm, lambda) integral(@(w) bm.^2 .* (w .* mag_sqr_S0(w)).^2 ./ Vm_arr(w, lambda), -Inf, Inf, 'ArrayValued', true);
 
-%% Define experiment list
-experiment_list = "multi_antenna_base";   % any of "multi_antenna_base", "time_shift_sensitivity", "attacker_count"
+%% CSI-error directions z (one per sensor, antenna and deployment), drawn from their own stream and
+% restoring the global one, so every other random quantity is unchanged by the CSI experiment.
+rng_state = rng;
+rng(csi_seed);
+all_zi_total = (randn(size(all_gi_total)) + 1i*randn(size(all_gi_total)))/sqrt(2);
+rng(rng_state);
 
-for experiment_idx = 1:numel(experiment_list)
-    experiment = experiment_list(experiment_idx);
+%% Define experiment list
+experiment_list = "multi_antenna_base";   % any of "multi_antenna_base", "time_shift_sensitivity", "attacker_count", "csi_sensitivity"
+
+% One run per experiment, except "csi_sensitivity", which runs once per CSI level in csi_nmse_db_list.
+run_experiment = strings(1, 0);
+run_csi_db     = [];
+for e = experiment_list
+    if e == "csi_sensitivity"
+        run_experiment = [run_experiment, repmat(e, 1, numel(csi_nmse_db_list))]; %#ok<AGROW>
+        run_csi_db     = [run_csi_db, csi_nmse_db_list]; %#ok<AGROW>
+    else
+        run_experiment = [run_experiment, e]; %#ok<AGROW>
+        run_csi_db     = [run_csi_db, csi_nmse_db_default]; %#ok<AGROW>
+    end
+end
+
+for experiment_idx = 1:numel(run_experiment)
+    experiment  = run_experiment(experiment_idx);
+    csi_nmse_db = run_csi_db(experiment_idx);    % CSI NMSE of this run (dB), -Inf = perfect
+    csi_eps     = 10^(csi_nmse_db/10);            % error variance per coefficient (0 = perfect)
+    if isinf(csi_nmse_db)
+        csi_str = "perfect";
+    else
+        csi_str = "nmse" + compose("%g", csi_nmse_db) + "dB";
+    end
+    if experiment == "csi_sensitivity"
+        save_name = experiment + "_" + csi_str;   % one set of output files per CSI level
+    else
+        save_name = experiment;
+    end
 
     pad_str = '----------';
-    msg = [pad_str  ' ' 'Running: ' char(experiment) ' ' pad_str];
+    msg = [pad_str  ' ' 'Running: ' char(save_name) ' ' pad_str];
     log_msg(verbosity_level, 1, '%s', msg);
     atk_model_str = ["broadband (injected directly as u_i)", "in-band (spoofed observation, matched-filtered)"];
     log_msg(verbosity_level, 1, 'Waveform attack model: %s', atk_model_str(attack_inband + 1));
+    if isinf(csi_nmse_db)
+        log_msg(verbosity_level, 1, 'CSI: perfect');
+    else
+        log_msg(verbosity_level, 1, 'CSI: imperfect, NMSE = %g dB (eps = %.3g)', csi_nmse_db, csi_eps);
+    end
 
     % Configure strategies
     agent_db_values = 0;
@@ -228,6 +286,9 @@ for experiment_idx = 1:numel(experiment_list)
 
     % Attacks to test -- each runs the full Monte Carlo sweep. Valid names are listed below.
     attacks = ["time shift"];
+    if experiment == "csi_sensitivity"
+        attacks = csi_attacks;
+    end
 
     valid_attacks = ["none", "noise", "sinusoid", "peak", "flip", "time shift", "amplitude scale"];
     attacks = unique(attacks, 'stable');   % no duplicate runs
@@ -262,11 +323,21 @@ for experiment_idx = 1:numel(experiment_list)
         attacks      = ["none", "time shift " + compose("%g", ts_multiples) + "dt"];
         pivot_types  = ["none", repmat("time shift", 1, numel(ts_multiples))];
         pivot_shift  = [NaN, ts_shift_s];
-        log_msg(verbosity_level, 1, 'Time-shift sensitivity: Delta = dt = %.4g ms = %.4g%% of t0_true (%.4g s)', ...
-            1e3*ts_delta, 100*ts_delta/t0_true, t0_true);
+        channel_snr  = ts_channel_snr;
+        log_msg(verbosity_level, 1, 'Time-shift sensitivity: Delta = dt = %.4g ms = %.4g%% of t0_true (%.4g s), channel SNR %s dB', ...
+            1e3*ts_delta, 100*ts_delta/t0_true, t0_true, mat2str(ts_channel_snr));
         for q = 1:numel(ts_multiples)
             log_msg(verbosity_level, 1, '  n = %-5g shift = %8.3f ms = %7.3f%% of t0_true', ts_multiples(q), 1e3*ts_shift_s(q), ts_shift_pct(q));
         end
+    elseif experiment == "csi_sensitivity"
+        agent_db_values = csi_agent_db;
+        channel_snr     = csi_channel_snr;
+        pivot_types     = attacks;
+        pivot_shift     = nan(size(attacks));
+        pivot_shift(attacks == "time shift") = t0_attacker - t0_true;
+        detection_only  = csi_detection_only;
+        log_msg(verbosity_level, 1, 'CSI sensitivity: agent SNR %g dB, channel SNR %s dB, %d attacks%s', ...
+            csi_agent_db, mat2str(csi_channel_snr), numel(attacks), repmat(' (detection only)', 1, csi_detection_only));
     else
         pivot_types = attacks;
         pivot_shift = nan(size(attacks));
@@ -329,6 +400,7 @@ for experiment_idx = 1:numel(experiment_list)
     det_all_caught = zeros(det_size);     % trials in which every compromised sensor was flagged
     det_any_fa     = zeros(det_size);     % trials in which at least one honest sensor was flagged
     det_ntrials    = zeros(det_size);     % trials counted (trials x deployments)
+    det_all_flagged = zeros(det_size);    % trials with EVERY sensor flagged (defended estimate falls back to the median)
 
     % ROC (Pd vs Pf): per-sensor flag counts with each test's OWN threshold swept over its
     % natural range (no normalization). The +/-Inf end points flag every sensor / none, so
@@ -361,6 +433,7 @@ for experiment_idx = 1:numel(experiment_list)
 
         % Small per-deployment quantities are sliced; large noise arrays are drawn per batch.
         all_gi = all_gi_total(:,:,:,:,dep_range);
+        all_zi = all_zi_total(:,:,:,:,dep_range);   % CSI-error directions (used only when csi_eps > 0)
         all_mi = all_mi_total(:,:,:,:,dep_range);
         rng(seed + batch_idx);
         all_w = randn(K,S_max,1,nTrials,nDeployments);                     % sensor noise
@@ -483,6 +556,10 @@ for experiment_idx = 1:numel(experiment_list)
                         phase_comp = exp(-1j * angle(g_ref));
                         g_tilde = gi .* phase_comp;
                     end
+                    % Fusion center's LS (pilot) estimate of the effective, pre-compensated channel: true
+                    % channel plus independent CN(0, csi_eps) error; equals g_tilde exactly for perfect CSI.
+                    % g_tilde generates the data, g_tilde_hat processes it.
+                    g_tilde_hat = g_tilde + sqrt(csi_eps) * all_zi(:,1:S,:,:,:);
 
                     % Sensor combining at each antenna: one (K x s)*(s x M) product per (trial, deployment)
                     % page, instead of broadcasting a K x S x M x nTrials x D temporary (~2 GB).
@@ -495,10 +572,19 @@ for experiment_idx = 1:numel(experiment_list)
                     end
 
                     %% Channel-independent whitening basis (eigenvalues rescaled per channel SNR below)
+                    % G_R_hat (server's CSI) drives every estimator; G_R (true channel) only the CRLBs.
                     m = reshape(mi_5d, S, nDeployments);                   % S x nDeployments
                     g = reshape(g_tilde, S, num_antennas, nDeployments);
                     G_R = permute(cat(2, real(g), imag(g)), [2,1,3]);      % Mtot x S x nDeployments
-                    [UB_transpose, lambda_B_base] = whitening_basis(G_R, m, gamma_w);
+                    g_hat = reshape(g_tilde_hat, S, num_antennas, nDeployments);
+                    G_R_hat = permute(cat(2, real(g_hat), imag(g_hat)), [2,1,3]);
+                    [UB_transpose, lambda_B_base] = whitening_basis(G_R_hat, m, gamma_w);
+                    if csi_eps > 0
+                        [UB_transpose_true, lambda_B_base_true] = whitening_basis(G_R, m, gamma_w);
+                    else
+                        UB_transpose_true = UB_transpose;
+                        lambda_B_base_true = lambda_B_base;
+                    end
 
                     % Oracle CRLB: same construction using only the honest sensors.
                     if attacker_enabled
@@ -520,10 +606,10 @@ for experiment_idx = 1:numel(experiment_list)
                         Pi_i_d = zeros(r_dim, Mtot, nDeployments);
                         breve_g_i_d = zeros(r_dim, nDeployments);
                         for d_idx = 1:nDeployments
-                            G_others = G_R(:, others, d_idx);      % Mtot x (S-1)
+                            G_others = G_R_hat(:, others, d_idx);  % Mtot x (S-1), server's CSI
                             Pi_i_mat = null(G_others.').';          % r_dim x Mtot, orthonormal rows
                             Pi_i_d(:,:,d_idx) = Pi_i_mat;
-                            breve_g_i_d(:,d_idx) = Pi_i_mat * G_R(:, i, d_idx);
+                            breve_g_i_d(:,d_idx) = Pi_i_mat * G_R_hat(:, i, d_idx);
                         end
                         Pi_all{i} = Pi_i_d;
                         breve_g_all{i} = breve_g_i_d;
@@ -573,7 +659,11 @@ for experiment_idx = 1:numel(experiment_list)
                             W           = (1/sqrt(0.5*gamma_n)) * UB_transpose;      % 2M x 2M x nDeployments
                             W_bcast     = reshape(W, Mtot, Mtot, 1, nDeployments);
                             mu          = m.^2;
-                            WG_Rmu      = reshape(pagemtimes(W, pagemtimes(G_R, reshape(mu, S, 1, nDeployments))), Mtot, nDeployments);
+                            WG_Rmu      = reshape(pagemtimes(W, pagemtimes(G_R_hat, reshape(mu, S, 1, nDeployments))), Mtot, nDeployments);
+                            % True-channel counterparts, used only by the CRLB (perfect-CSI reference)
+                            lambda_vals_true = (2/gamma_n) * lambda_B_base_true;
+                            WG_Rmu_true = reshape(pagemtimes((1/sqrt(0.5*gamma_n)) * UB_transpose_true, ...
+                                pagemtimes(G_R, reshape(mu, S, 1, nDeployments))), Mtot, nDeployments);
 
                             % Per-branch Wiener filters and their b_m^2-weighted sum
                             Qn_all = cell(Mtot, 1);
@@ -591,7 +681,7 @@ for experiment_idx = 1:numel(experiment_list)
                             alpha_estimates_full_honest = zeros(1,1,nTrials,nDeployments);
                             t0_estimates_full_honest    = zeros(1,1,nTrials,nDeployments);
                             for d_idx = 1:nDeployments
-                                geom = cached_null_geometry(geom_cache, [], mi_5d, g_tilde, gamma_w, gamma_n, Hm_arr, omega, dt, K, S, d_idx);
+                                geom = cached_null_geometry(geom_cache, [], mi_5d, g_tilde_hat, gamma_w, gamma_n, Hm_arr, omega, dt, K, S, d_idx);
                                 [alpha_b, t0_b, ~] = estimate_with_geometry(geom, y_no_attack, K, N, Tp, ...
                                     norm_fact, t, t0_true, mfTemplateFFT_raw, D_template, 1:nTrials, d_idx, dt, offset_idx, alpha_uses_true_t0);
                                 alpha_estimates_full_honest(1,1,:,d_idx) = alpha_b;
@@ -600,8 +690,8 @@ for experiment_idx = 1:numel(experiment_list)
                             full_honest_mse = alpha_t0_mse(alpha_estimates_full_honest, t0_estimates_full_honest, alpha_true, t0_true);
 
                             % --- CRLBs (2 x nDeployments: row 1 alpha, row 2 t0)
-                            alpha_term = integral(@(w) sum(WG_Rmu.^2 .*          mag_sqr_S0(w).^2 ./ (lambda_vals.*mag_sqr_S0(w)+1), 1), -Inf, Inf, 'ArrayValued', true);
-                            t0_term    = integral(@(w) sum(WG_Rmu.^2 .* (w.^2) .* mag_sqr_S0(w).^2 ./ (lambda_vals.*mag_sqr_S0(w)+1), 1), -Inf, Inf, 'ArrayValued', true);
+                            alpha_term = integral(@(w) sum(WG_Rmu_true.^2 .*          mag_sqr_S0(w).^2 ./ (lambda_vals_true.*mag_sqr_S0(w)+1), 1), -Inf, Inf, 'ArrayValued', true);
+                            t0_term    = integral(@(w) sum(WG_Rmu_true.^2 .* (w.^2) .* mag_sqr_S0(w).^2 ./ (lambda_vals_true.*mag_sqr_S0(w)+1), 1), -Inf, Inf, 'ArrayValued', true);
                             crlb_pair = [2*pi ./ alpha_term; 2*pi ./ (alpha_true^2 .* t0_term)];
 
                             if attacker_enabled
@@ -929,7 +1019,7 @@ for experiment_idx = 1:numel(experiment_list)
                                     alpha_estimates_oracle = zeros(size(alpha_estimates));
                                     t0_estimates_oracle    = zeros(size(t0_estimates_for_plot));
                                     for d_idx = 1:nDeployments
-                                        geom = cached_null_geometry(geom_cache, true_atk, mi_5d, g_tilde, gamma_w, gamma_n, Hm_arr, omega, dt, K, S, d_idx);
+                                        geom = cached_null_geometry(geom_cache, true_atk, mi_5d, g_tilde_hat, gamma_w, gamma_n, Hm_arr, omega, dt, K, S, d_idx);
                                         [alpha_o, t0_o, ~] = estimate_with_geometry(geom, y, K, N, Tp, ...
                                             norm_fact, t, t0_true, mfTemplateFFT_raw, D_template, 1:nTrials, d_idx, dt, offset_idx, alpha_uses_true_t0);
                                         alpha_estimates_oracle(1,1,:,d_idx) = alpha_o;
@@ -944,6 +1034,7 @@ for experiment_idx = 1:numel(experiment_list)
                                 tp_total = 0;
                                 fp_total = 0;
                                 fn_total = 0;
+                                n_all_flagged = 0;   % trials that fell back to the median
 
                                 for d_idx = 1:nDeployments
                                     [unique_sets, group_idx] = unique_cell_sets(excluded_sets(:,d_idx));
@@ -961,8 +1052,14 @@ for experiment_idx = 1:numel(experiment_list)
                                         if isempty(A)
                                             continue   % nothing flagged -- keep undefended estimate
                                         end
+                                        if numel(A) == S   % every sensor flagged: nothing left to estimate from
+                                            alpha_final(1,1,trial_members,d_idx) = med_alpha(1,1,trial_members,d_idx);
+                                            t0_final(1,1,trial_members,d_idx)    = med_t0(1,1,trial_members,d_idx);
+                                            n_all_flagged = n_all_flagged + n_members;
+                                            continue
+                                        end
 
-                                        geom = cached_null_geometry(geom_cache, A, mi_5d, g_tilde, gamma_w, gamma_n, Hm_arr, omega, dt, K, S, d_idx);
+                                        geom = cached_null_geometry(geom_cache, A, mi_5d, g_tilde_hat, gamma_w, gamma_n, Hm_arr, omega, dt, K, S, d_idx);
                                         [alpha_A, t0_A, ~] = estimate_with_geometry(geom, y, K, N, Tp, ...
                                             norm_fact, t, t0_true, mfTemplateFFT_raw, D_template, trial_members, d_idx, dt, offset_idx, alpha_uses_true_t0);
 
@@ -987,6 +1084,7 @@ for experiment_idx = 1:numel(experiment_list)
                                 det_tp(det_idx{:}) = det_tp(det_idx{:}) + tp_total;   % summed over batches
                                 det_fp(det_idx{:}) = det_fp(det_idx{:}) + fp_total;
                                 det_fn(det_idx{:}) = det_fn(det_idx{:}) + fn_total;
+                                det_all_flagged(det_idx{:}) = det_all_flagged(det_idx{:}) + n_all_flagged;
                                 fp_rate_combined(det_idx{:}) = fp_rate_combined(det_idx{:}) + fp_stats('combined') * nDeployments / nDeployments_total;
 
                                 alpha_estimates = alpha_final;
@@ -1018,7 +1116,7 @@ for experiment_idx = 1:numel(experiment_list)
                         end
 
                         % Checkpoint after each channel-SNR point so a crash doesn't lose finished results.
-                        save(experiment + "_checkpoint.mat", "rho_*", "det_*", "roc_*", "fp_rate_combined", "pivot_vals", ...
+                        save(save_name + "_checkpoint.mat", "rho_*", "det_*", "roc_*", "fp_rate_combined", "pivot_vals", ...
                             "batch_idx", "agent_db_idx", "sensor_idx", "scheme_idx", "channel_db_idx");
 
                         total_channel_db_time = toc(channel_db_start);
@@ -1040,7 +1138,7 @@ for experiment_idx = 1:numel(experiment_list)
     % Stop run timer.
     runtime = toc(loopTic);
     % Display total run time.
-    log_msg(verbosity_level, 1, '%s took %dm %.1fs', experiment, floor(runtime/60), mod(runtime,60));
+    log_msg(verbosity_level, 1, '%s took %dm %.1fs', save_name, floor(runtime/60), mod(runtime,60));
     
     %% Compute averages across deployments.
     if nDeployments_total == 1
@@ -1077,13 +1175,17 @@ for experiment_idx = 1:numel(experiment_list)
         "experiment", "sensor_dimension", "K", "nDeployments", "nDeployments_total", "constraints", "transforms", "coeff_types", "approaches",...
         "iter_arr", "iter_length", "all_strats", "num_strats", "alpha_uses_true_t0",...
         "T0", "Tp", "alpha_true", "t0_true", "pivot_vals", "Mtot", "N", "S", "S_max","attacks", "attacker_enabled", "pivot_types", "pivot_shift", "batch_time", "runtime", ...
-        "avg_dep_mse_conv", "conventional_methods", "conv_trim", "conv_mad_k", "conv_rejection", "attack_inband"];
+        "avg_dep_mse_conv", "conventional_methods", "conv_trim", "conv_mad_k", "conv_rejection", "attack_inband", ...
+        "csi_nmse_db", "csi_eps"];
     
-    save(experiment + "_results.mat", files_to_save{:})
+    save(save_name + "_results.mat", files_to_save{:})
     if experiment == "time_shift_sensitivity"
-        save(experiment + "_results.mat", "ts_delta", "ts_multiples", "ts_shift_s", "ts_shift_pct", "-append");
+        save(save_name + "_results.mat", "ts_delta", "ts_multiples", "ts_shift_s", "ts_shift_pct", "ts_channel_snr", "-append");
     elseif experiment == "attacker_count"
-        save(experiment + "_results.mat", "ac_counts", "ac_attacks", "ac_agent_db", "ac_channel_snr", "-append");
+        save(save_name + "_results.mat", "ac_counts", "ac_attacks", "ac_agent_db", "ac_channel_snr", "-append");
+    elseif experiment == "csi_sensitivity"
+        save(save_name + "_results.mat", "csi_nmse_db_list", "csi_attacks", "csi_agent_db", "csi_channel_snr", ...
+            "csi_detection_only", "csi_seed", "-append");
     end
 
     if ~detection_only
@@ -1104,7 +1206,7 @@ for experiment_idx = 1:numel(experiment_list)
         var_names = ["attack", "channel_snr_db", reshape(method_names + ["_mse_alpha"; "_mse_t0"], 1, []), "TP", "FP", "FN", "honest_fp_rate"];
         summary_tbl = cell2table(rows, 'VariableNames', cellstr(var_names));
         disp(summary_tbl)
-        writetable(summary_tbl, experiment + "_summary.csv");
+        writetable(summary_tbl, save_name + "_summary.csv");
     else
         %% Detection-only summary: combined detector per sweep entry (first channel SNR / agent SNR / sensor count)
         c = 1;
@@ -1117,10 +1219,10 @@ for experiment_idx = 1:numel(experiment_list)
         summary_tbl = table(pivot_vals(:), pivot_types(:), n_comp, pd_comb, pf_comb, p_all, p_fa, ...
             'VariableNames', {'entry', 'attack', 'n_attackers', 'Pd', 'Pf', 'P_all_caught', 'P_any_false_flag'});
         disp(summary_tbl)
-        writetable(summary_tbl, experiment + "_detection.csv");
+        writetable(summary_tbl, save_name + "_detection.csv");
     end
-    save(experiment + "_results.mat", "summary_tbl", "det_tp", "det_fp", "det_fn", "fp_rate_combined", ...
-        "det_all_caught", "det_any_fa", "det_ntrials", "pivot_n", "pivot_atk", "detection_only", ...
+    save(save_name + "_results.mat", "summary_tbl", "det_tp", "det_fp", "det_fn", "fp_rate_combined", ...
+        "det_all_caught", "det_any_fa", "det_ntrials", "det_all_flagged", "pivot_n", "pivot_atk", "detection_only", ...
         "roc_corr_grid", "roc_k_grid", "roc_spread_names", "detector_spread", "roc_corr_det", "roc_corr_fa", ...
         "roc_alpha_det", "roc_alpha_fa", "roc_t0_det", "roc_t0_fa", "roc_n_atk", "roc_n_hon", ...
         "corr_min", "alpha_delta_k", "t0_delta_k", "mad_scale", "-append");   % current operating point
