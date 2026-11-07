@@ -2,11 +2,11 @@
 % Run standalone, or after multi_antenna.m with experiment_list = "csi_sensitivity". Loads every
 % csi_sensitivity_*_results.mat in the current folder (one file per CSI level); perfect CSI
 % (NMSE = -Inf) is drawn at the left end of the x-axis and labelled "perfect".
-%   Figure 1: normalized MSE (rows t0, alpha) vs CSI NMSE for the estimators in show_methods, one column
+%   Figure 1: normalized MSE (columns t0, alpha) vs CSI NMSE for the estimators in show_methods, one row
 %             per channel SNR in show_snr.
 %             A dashed vertical line marks the worst CSI at which the proposed t0 NMSE is still within
 %             oracle_tol of the oracle.
-%   Figure 2: detection vs CSI NMSE (rows Pd, Pf, per-trial rates), one column per channel SNR in show_snr;
+%   Figure 2: detection vs CSI NMSE (columns Pd, Pf), one row per channel SNR in show_snr;
 %             Pd and Pf per test at the thresholds used in the simulation.
 
 files = dir("csi_sensitivity_*_results.mat");
@@ -21,7 +21,9 @@ L = L(order);
 attack       = "noise";   % attack to plot (must be in csi_attacks of the run)
 oracle_tol   = 0.10;      % "near-oracle": proposed t0 NMSE <= (1 + oracle_tol) x oracle
 log_pf       = false;     % true: log-scale Pf axis (points with Pf = 0 are then not drawn)
-show_snr     = 5;         % channel SNR(s) (dB) to draw and tabulate, any of those in the run
+show_snr     = 5;         % channel SNR(s) (dB) to draw and tabulate, any of those in the run (one row each)
+leg_tile     = 1;         % Figure 1 tile that holds the legend: 1 = NMSE(t0), 2 = NMSE(alpha)
+font_size    = 12;        % font size of all axes (legends: 2 pt smaller)
 save_figs    = true;      % save each figure as a 300 dpi PNG to ~\Desktop\Byzantine AirComp Results\csi_sensitivity\
 show_methods = ["Proposed", "Oracle", "median"];   % estimators drawn in Figure 1, any of: "Proposed",
                           % "Undefended", "Oracle", "Full honest", and the conventional baselines of the run
@@ -118,12 +120,12 @@ for c = snr_idx
     end
 end
 
-%% Figure 1: normalized MSE vs CSI NMSE (rows: t0, alpha; columns: channel SNR)
-[tl, fig1] = grid_figure(1, 2, numel(snr_idx), {'Imperfect CSI: normalized MSE vs CSI NMSE', run_info});
-rows = [2 1];   % t0 first
-for r = 1:2
-    prm = rows(r);
-    for c = snr_idx
+%% Figure 1: normalized MSE vs CSI NMSE (columns: t0, alpha; rows: channel SNR)
+[tl, fig1] = grid_figure(1, numel(snr_idx), 2, {'Imperfect CSI: normalized MSE vs CSI NMSE', run_info});
+cols = [2 1];   % t0 first
+for c = snr_idx
+    for r = 1:2
+        prm = cols(r);
         ax = nexttile(tl);
         hold(ax, 'on');
         for q = 1:size(methods, 1)
@@ -132,62 +134,52 @@ for r = 1:2
         end
         mark_limit(ax, near_oracle(c));
         ax.YScale = 'log';
-        style_csi_axes(ax, x_pos, x_labels);
-        if r == 1
-            title(ax, sprintf('%g dB channel SNR', snr_vals(c)), 'FontWeight', 'normal');
-        end
+        style_csi_axes(ax, x_pos, x_labels, font_size);
         if c == snr_idx(1)
-            ylabel(ax, sprintf('NMSE(%s)', param_lbl(prm)));
+            title(ax, sprintf('NMSE(%s)', param_lbl(prm)), 'FontWeight', 'normal');
         end
-        if r == 2
+        if r == 1
+            ylabel(ax, {sprintf('%g dB channel SNR', snr_vals(c)), 'normalized MSE'});
+        end
+        if c == snr_idx(end)
             xlabel(ax, 'CSI NMSE (dB)');
         end
-        if r == 1 && c == snr_idx(1)
-            ax_leg = ax;
+        if r == leg_tile && c == snr_idx(1)
+            legend(ax, 'Location', 'best', 'FontSize', font_size - 2);
         end
     end
 end
-lgd = legend(ax_leg, 'Orientation', 'vertical');
-lgd.Layout.Tile = 'east';
 
-%% Figure 2: detection vs CSI NMSE (rows: Pd, Pf, per-trial rates; columns: channel SNR)
-[tl, fig2] = grid_figure(2, 3, numel(snr_idx), {'Imperfect CSI: detection vs CSI NMSE', run_info});
-for row = 1:3
-    for c = snr_idx
+%% Figure 2: Pd and Pf vs CSI NMSE (columns: Pd, Pf; rows: channel SNR)
+[tl, fig2] = grid_figure(2, numel(snr_idx), 2, {'Imperfect CSI: detection vs CSI NMSE', run_info});
+rate_lbl = ["P_d (per sensor)", "P_f (per sensor)"];
+for c = snr_idx
+    for col = 1:2   % 1: Pd, 2: Pf
         ax = nexttile(tl);
         hold(ax, 'on');
-        if row < 3
-            for q = 1:size(tests, 1)
-                plot(ax, x_pos, rate_of(tests{q, 1 + row}, c), '-o', 'Color', tests{q,4}, ...
-                    'LineWidth', 1.5, 'MarkerSize', 5, 'DisplayName', tests{q,1});
-            end
-        else
-            plot(ax, x_pos, rate_of(@(R,cc) trial_rate('det_all_caught', R, cc), c), '-o', 'Color', [0 0 0], ...
-                'LineWidth', 1.5, 'MarkerSize', 5, 'DisplayName', 'P(all attackers flagged)');
-            plot(ax, x_pos, rate_of(@(R,cc) trial_rate('det_any_fa', R, cc), c), '--s', 'Color', C(7,:), ...
-                'LineWidth', 1.5, 'MarkerSize', 5, 'DisplayName', 'P(\geq 1 honest flagged)');
-            plot(ax, x_pos, rate_of(@(R,cc) trial_rate('det_all_flagged', R, cc), c), ':d', 'Color', C(4,:), ...
-                'LineWidth', 1.5, 'MarkerSize', 5, 'DisplayName', 'P(all flagged \rightarrow median fallback)');
+        for q = 1:size(tests, 1)
+            plot(ax, x_pos, rate_of(tests{q, 1 + col}, c), '-o', 'Color', tests{q,4}, ...
+                'LineWidth', 1.5, 'MarkerSize', 5, 'DisplayName', tests{q,1});
         end
         mark_limit(ax, near_oracle(c));
-        style_csi_axes(ax, x_pos, x_labels);
-        if row == 2 && log_pf
+        style_csi_axes(ax, x_pos, x_labels, font_size);
+        if col == 2 && log_pf
             ax.YScale = 'log';
         else
             ylim(ax, [-0.05 1.08]);
-        end
-        if row == 1
-            title(ax, sprintf('%g dB channel SNR', snr_vals(c)), 'FontWeight', 'normal');
+            set_ticks(ax, 'y', 0:0.25:1);
         end
         if c == snr_idx(1)
-            row_lbl = ["P_d (per sensor)", "P_f (per sensor)", "per-trial rate"];
-            ylabel(ax, row_lbl(row));
+            title(ax, rate_lbl(col), 'FontWeight', 'normal');
         end
-        if row == 3
+        if col == 1
+            ylabel(ax, {sprintf('%g dB channel SNR', snr_vals(c)), 'rate'});
+        end
+        if c == snr_idx(end)
             xlabel(ax, 'CSI NMSE (dB)');
         end
-        if c == snr_idx(end) && row ~= 2
-            legend(ax, 'Location', 'eastoutside', 'FontSize', 9);
+        if col == 2 && c == snr_idx(1)
+            legend(ax, 'Location', 'best', 'FontSize', font_size - 2);
         end
     end
 end
@@ -246,15 +238,14 @@ end
 function [tl, fig] = grid_figure(fig_count, rows, cols, ttl)
     fig = figure("Name", ttl{1}, "Color", "w");
     scr = get(groot, 'ScreenSize');
-    w = min(scr(3) - 80,  360*cols + 260);
+    w = min(scr(3) - 80,  380*cols + 100);
     h = min(scr(4) - 140, 280*rows + 140);
     set(fig, 'Position', [40 + 25*fig_count, max(40, scr(4) - h - 90 - 25*fig_count), w, h]);
     tl = tiledlayout(fig, rows, cols, 'TileSpacing', 'compact', 'Padding', 'compact');
-    title(tl, ttl{1}, 'FontWeight', 'bold');
-    subtitle(tl, ttl{2});
 end
 
-function style_csi_axes(ax, x_pos, x_labels)
+function style_csi_axes(ax, x_pos, x_labels, font_size)
+    ax.FontSize = font_size;
     xlim(ax, [min(x_pos) - 2, max(x_pos) + 2]);
     ax.XTick = x_pos;
     ax.XTickLabel = x_labels;
@@ -265,5 +256,18 @@ end
 function mark_limit(ax, x_lim)
     if ~isnan(x_lim)
         xline(ax, x_lim, '--', 'Color', [0.35 0.35 0.35], 'LineWidth', 1, 'HandleVisibility', 'off');
+    end
+end
+
+function set_ticks(ax, which, ticks)
+% Ticks at every value of `ticks`, labels on every other one (the first, third, ...).
+    lbl = cellstr(compose("%g", ticks(:)));
+    lbl(2:2:end) = {''};
+    if which == 'x'
+        ax.XTick = ticks;
+        ax.XTickLabel = lbl;
+    else
+        ax.YTick = ticks;
+        ax.YTickLabel = lbl;
     end
 end

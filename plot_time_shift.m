@@ -1,7 +1,6 @@
 % PLOT_TIME_SHIFT  Time-shift sensitivity: MSE, Pd and Pf against the attacker's shift n*Delta.
 % Run standalone, or after multi_antenna.m with experiment_list = "time_shift_sensitivity".
-% The attacker's pulse is moved to t0_true + n*Delta, Delta = one sample (dt). x-axis ticks show n
-% and the shift as a percentage of t0_true.
+% The attacker's pulse is moved to t0_true + n*Delta, Delta = one sample (dt). x-axis: n.
 %   Figure 1: normalized MSE (alpha, t0) per estimator; dashed = proposed with no attack
 %   Figure 2: Pd and Pf of each detection test at the thresholds used in the simulation
 % A dashed vertical line marks the detection floor: the smallest shift with combined Pd >= pd_target.
@@ -15,7 +14,9 @@ R = load(results_file);   % struct, so the caller's workspace isn't overwritten
 experiment_name = erase(string(results_file), "_results.mat");   % used in the saved file names
 
 pd_target    = 0.9;   % detection floor = smallest shift with combined Pd >= pd_target
-show_snr     = 5;    % channel SNR(s) (dB) to draw and tabulate, any of those in the run
+show_snr     = 5;    % channel SNR(s) (dB) to draw and tabulate, any of those in the run (one row each)
+leg_tile     = 2;    % Figure 1 tile that holds the legend: 1 = NMSE(alpha), 2 = NMSE(t0)
+font_size    = 12;    % font size of all axes (legends: 2 pt smaller)
 save_figs    = true;  % save each figure as a 300 dpi PNG to ~\Desktop\Byzantine AirComp Results\<experiment>\
 agent_db_idx = 1;
 sensor_idx   = 1;
@@ -35,7 +36,8 @@ end
 norm_coeffs = [R.alpha_true^2, R.t0_true^2];     % normalized MSE = MSE / theta_true^2
 param_lbl   = ["\alpha", "t_0"];
 x_ticks  = n_vals;
-x_labels = compose("%g\\newline(%.2g%%)", n_vals.', pct_vals.');
+x_labels = compose("%g", n_vals.');
+x_labels(2:2:end) = "";                          % label every other tick to avoid crowding
 run_info = sprintf('\\Delta = dt = %.3g ms = %.3g%% of t_0 (%.4g s) | agent SNR %g dB, S = %d, detector: normcorr + %s', ...
     1e3*R.ts_delta, 100*R.ts_delta/R.t0_true, R.t0_true, R.agent_db_values(agent_db_idx), R.sensor_vals(sensor_idx), upper(R.detector_spread));
 
@@ -85,10 +87,10 @@ for c = snr_idx
     end
 end
 
-%% Figure 1: normalized MSE vs shift (rows: alpha, t0; columns: channel SNR)
-[tl, fig1] = grid_figure(1, 2, numel(snr_idx), {'Time-shift sensitivity: normalized MSE vs shift n\Delta', run_info});
-for prm = 1:2
-    for c = snr_idx
+%% Figure 1: normalized MSE vs shift (columns: alpha, t0; rows: channel SNR)
+[tl, fig1] = grid_figure(1, numel(snr_idx), 2, {'Time-shift sensitivity: normalized MSE vs shift n\Delta', run_info});
+for c = snr_idx
+    for prm = 1:2
         ax = nexttile(tl);
         hold(ax, 'on');
         for q = 1:size(methods, 1)
@@ -99,28 +101,26 @@ for prm = 1:2
             'DisplayName', 'Proposed, no attack');
         mark_floor(ax, floor_n(c));
         ax.YScale = 'log';
-        style_shift_axes(ax, x_ticks, x_labels);
-        if prm == 1
-            title(ax, sprintf('%g dB channel SNR', snr_vals(c)), 'FontWeight', 'normal');
-        end
+        style_shift_axes(ax, x_ticks, x_labels, font_size);
         if c == snr_idx(1)
-            ylabel(ax, sprintf('NMSE(%s)', param_lbl(prm)));
+            title(ax, sprintf('NMSE(%s)', param_lbl(prm)), 'FontWeight', 'normal');
         end
-        if prm == 2
-            xlabel(ax, 'n (shift as % of t_0)');
+        if prm == 1
+            ylabel(ax, {sprintf('%g dB channel SNR', snr_vals(c)), 'normalized MSE'});
         end
-        if prm == 1 && c == snr_idx(1)
-            ax_leg = ax;
+        if c == snr_idx(end)
+            xlabel(ax, 'n  (attacker delay t_0 + n\Delta{}t)');
+        end
+        if prm == leg_tile && c == snr_idx(1)
+            legend(ax, 'Location', 'best', 'FontSize', font_size - 2);
         end
     end
 end
-lgd = legend(ax_leg, 'Orientation', 'vertical');
-lgd.Layout.Tile = 'east';
 
-%% Figure 2: Pd and Pf vs shift (rows: Pd, Pf; columns: channel SNR)
-[tl, fig2] = grid_figure(2, 2, numel(snr_idx), {sprintf('Time-shift sensitivity: detection vs shift n\\Delta (dashed vertical: Pd = %g floor)', pd_target), run_info});
-for row = 1:2
-    for c = snr_idx
+%% Figure 2: Pd and Pf vs shift (columns: Pd, Pf; rows: channel SNR)
+[tl, fig2] = grid_figure(2, numel(snr_idx), 2, {sprintf('Time-shift sensitivity: detection vs shift n\\Delta (dashed vertical: Pd = %g floor)', pd_target), run_info});
+for c = snr_idx
+    for row = 1:2   % 1: Pd, 2: Pf (one column each)
         ax = nexttile(tl);
         hold(ax, 'on');
         for q = 1:size(tests, 1)
@@ -130,30 +130,29 @@ for row = 1:2
         if row == 1
             yline(ax, pd_target, ':', 'Color', [0.5 0.5 0.5], 'HandleVisibility', 'off');
             ylim(ax, [-0.05 1.08]);
+            set_ticks(ax, 'y', 0:0.25:1);
         else
             yline(ax, tests{1,3}(p_none, c), '--', 'Color', [0 0 0], 'LineWidth', 1, 'DisplayName', 'Combined Pf, no attack');
             pf_all = cellfun(@(f) max(f(p_ts, c)), tests(:,3));
             ylim(ax, [0, max(0.02, 1.15*max([pf_all; tests{1,3}(p_none, c)]))]);
         end
         mark_floor(ax, floor_n(c));
-        style_shift_axes(ax, x_ticks, x_labels);
-        if row == 1
-            title(ax, sprintf('%g dB channel SNR', snr_vals(c)), 'FontWeight', 'normal');
-        end
+        style_shift_axes(ax, x_ticks, x_labels, font_size);
+        rate_lbl = ["P_d", "P_f"];
         if c == snr_idx(1)
-            rate_lbl = ["P_d", "P_f"];
-            ylabel(ax, rate_lbl(row));
+            title(ax, rate_lbl(row), 'FontWeight', 'normal');
         end
-        if row == 2
-            xlabel(ax, 'n (shift as % of t_0)');
+        if row == 1
+            ylabel(ax, {sprintf('%g dB channel SNR', snr_vals(c)), 'rate'});
         end
-        if row == 2 && c == snr_idx(1)
-            ax_leg = ax;   % the Pf row carries the extra "no attack" legend entry
+        if c == snr_idx(end)
+            xlabel(ax, 'n  (attacker delay t_0 + n\Delta{}t)');
+        end
+        if row == 2 && c == snr_idx(1)   % the Pf tile carries the extra "no attack" legend entry
+            legend(ax, 'Location', 'best', 'FontSize', font_size - 2);
         end
     end
 end
-lgd = legend(ax_leg, 'Orientation', 'vertical');
-lgd.Layout.Tile = 'east';
 
 if save_figs
     file_info = string(R.agent_db_values(agent_db_idx)) + "_db_Tp=" + string(R.Tp) + "_S=" + string(R.sensor_vals(sensor_idx));
@@ -198,15 +197,14 @@ end
 function [tl, fig] = grid_figure(fig_count, rows, cols, ttl)
     fig = figure("Name", ttl{1}, "Color", "w");
     scr = get(groot, 'ScreenSize');
-    w = min(scr(3) - 80,  300*cols + 220);
+    w = min(scr(3) - 80,  380*cols + 100);
     h = min(scr(4) - 140, 280*rows + 140);
     set(fig, 'Position', [40 + 25*fig_count, max(40, scr(4) - h - 90 - 25*fig_count), w, h]);
     tl = tiledlayout(fig, rows, cols, 'TileSpacing', 'compact', 'Padding', 'compact');
-    title(tl, ttl{1}, 'FontWeight', 'bold');
-    subtitle(tl, ttl{2});
 end
 
-function style_shift_axes(ax, x_ticks, x_labels)
+function style_shift_axes(ax, x_ticks, x_labels, font_size)
+    ax.FontSize = font_size;
     ax.XScale = 'log';
     xlim(ax, [min(x_ticks)/1.3, max(x_ticks)*1.3]);
     ax.XTick = x_ticks;
@@ -218,5 +216,18 @@ end
 function mark_floor(ax, n_floor)
     if ~isnan(n_floor)
         xline(ax, n_floor, '--', 'Color', [0.35 0.35 0.35], 'LineWidth', 1, 'HandleVisibility', 'off');
+    end
+end
+
+function set_ticks(ax, which, ticks)
+% Ticks at every value of `ticks`, labels on every other one (the first, third, ...).
+    lbl = cellstr(compose("%g", ticks(:)));
+    lbl(2:2:end) = {''};
+    if which == 'x'
+        ax.XTick = ticks;
+        ax.XTickLabel = lbl;
+    else
+        ax.YTick = ticks;
+        ax.YTickLabel = lbl;
     end
 end

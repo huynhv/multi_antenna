@@ -8,7 +8,10 @@
 % plot_as_matrix = false: three figures, each a grid with one row per attack and one column per test:
 %   1. ROC (Pd vs Pf), one curve per channel SNR, 'o' at the threshold used in the simulation
 %   2. Pf vs threshold        3. Pd vs threshold
-% plot_as_matrix = true: one figure per attack, rows ROC / Pd vs threshold / Pf vs threshold.
+% plot_as_matrix = true: one figure per attack, 2 x 2. Top: the combined detector's Pd / Pf / per-trial
+%   rates vs channel SNR, then the ROC. Bottom: Pd vs threshold, Pf vs threshold. ROC and threshold
+%   tiles are at one channel SNR with the three tests overlaid (threshold tiles: corr_min on the
+%   bottom x axis, k on the top x axis).
 if exist('experiment', 'var')
     results_file = experiment + "_results.mat";
 else
@@ -22,8 +25,11 @@ pf_source    = "same";   % "same": Pf from honest sensors in the same attack sce
 log_pf       = false;    % true: log-scale Pf axis -- x on the ROC plots, y on the Pf-vs-threshold plots
                          % (points with Pf = 0 are then not drawn)
 show_legend  = true;
-plot_as_matrix = true;   % true: one figure per attack, 3 x 3 grid (rows: ROC, Pd vs threshold, Pf vs threshold;
-                         % columns: tests). false: three figures (ROC, Pf vs threshold, Pd vs threshold), rows = attacks
+plot_as_matrix = true;   % true: one figure per attack, 2 x 2 tiles: combined detector vs channel SNR, ROC (top);
+                         % Pd vs threshold, Pf vs threshold (bottom); tests overlaid, at matrix_snr. false: three figures (ROC, Pf vs threshold, Pd vs
+                         % threshold), rows = attacks, columns = tests, one curve per channel SNR
+matrix_snr   = 5;        % channel SNR (dB) of the matrix figures
+matrix_font  = 12;       % font size of the matrix figures (legends: 2 pt smaller)
 save_figs    = true;     % matrix mode only: save each figure as a 300 dpi PNG to
                          % ~\Desktop\Byzantine AirComp Results\<experiment>\
 agent_db_idx = 1;
@@ -93,50 +99,148 @@ run_info = sprintf('agent SNR %g dB, S = %d, Pf source: %s, * = used by the dete
     R.agent_db_values(agent_db_idx), R.sensor_vals(sensor_idx), pf_source);
 fig_count = 0;
 
-%% Matrix mode: one figure per attack, rows ROC / Pd vs threshold / Pf vs threshold, columns tests
-% ("none" has no attacker sensors, so no figure; its Pf is in the tables below)
+%% Matrix mode: one figure per attack, 2 x 2 tiles. Top row: the combined detector (OR of the tests at
+% the simulation's thresholds) vs channel SNR, then the ROC at matrix_snr. Bottom row: Pd and Pf vs
+% threshold at matrix_snr. ROC and threshold tiles overlay the three tests; threshold tiles have two
+% x axes: corr_min (normcorr, bottom) and k (alpha / t0, top). ("none" has no attacker sensors, so no figure.)
 if plot_as_matrix
-    row_names = ["ROC", "P_d vs threshold", "P_f vs threshold"];
+    c = find(snr_vals == matrix_snr, 1);
+    if isempty(c)
+        error('matrix_snr = %g dB is not in these results (channel SNRs: %s dB).', matrix_snr, mat2str(snr_vals));
+    end
+    test_colors = orderedcolors("gem");
+    test_colors = test_colors([1 2 4], :);   % blue, orange, purple (skip the hard-to-see yellow)
+    test_styles = ["-", "--", "-."];
+    k_tests = 2:3;   % tests swept over k (top axis); test 1 (normcorr) is swept over corr_min (bottom axis)
+    % Tick positions; set_ticks labels every other one (first, third, ...) to avoid crowding at matrix_font
+    prob_ticks = 0:0.25:1;                                             % Pd / Pf / rate axes
+    corr_ticks = 0:0.25:1;                                             % corr_min
+    k_ticks    = 0:1:max(R.roc_k_grid(isfinite(R.roc_k_grid)));        % k (Qn sigmas)
     for a = atk_list
         fig_count = fig_count + 1;
-        [tl, fig] = grid_figure(fig_count, 3, numel(show_idx), ...
-            {sprintf('Attack: %s -- ROC, Pd and Pf vs threshold, one curve per channel SNR', R.attacks(a)), run_info});
-        for r = 1:3
-            for cc = 1:numel(show_idx)
-                s = show_idx(cc);
+        [tl, fig] = grid_figure(fig_count, 2, 2, ...
+            {sprintf('Attack: %s -- %g dB channel SNR', R.attacks(a), matrix_snr), run_info}, false);   % no overall title: more room for the curves
+        fig.Position(3:4) = [950 820];   % room for the second (top) x axes
+
+        % Tile 1 -- combined detector (normcorr OR alpha OR t0 at the simulation's thresholds) vs channel SNR
+        pf_a = a;   % attack scenario the false-alarm rates come from
+        if pf_source == "none"
+            pf_a = none_idx;
+        end
+        cnt = @(fld, aa) reshape(R.(fld)(aa, :, agent_db_idx, sensor_idx), 1, []);
+        pd_comb  = cnt('det_tp', a) ./ (cnt('det_tp', a) + cnt('det_fn', a));
+        pf_comb  = cnt('det_fp', pf_a) ./ cnt('roc_n_hon', pf_a);
+        all_cght = cnt('det_all_caught', a) ./ cnt('det_ntrials', a);
+        any_fa   = cnt('det_any_fa', pf_a) ./ cnt('det_ntrials', pf_a);
+        ax = nexttile(tl);
+        hold(ax, 'on');
+        det_color = [0 0 0];
+        fa_color  = [0.85 0.2 0.2];
+        plot(ax, snr_vals, pd_comb,  '-o',  'Color', det_color, 'LineWidth', 1.5, 'MarkerSize', 5, 'DisplayName', 'P_d (per sensor)');
+        plot(ax, snr_vals, all_cght, '--s', 'Color', det_color, 'LineWidth', 1.5, 'MarkerSize', 5, 'DisplayName', 'P(all attackers flagged)');
+        plot(ax, snr_vals, pf_comb,  '-o',  'Color', fa_color,  'LineWidth', 1.5, 'MarkerSize', 5, 'DisplayName', 'P_f (per sensor)');
+        plot(ax, snr_vals, any_fa,   '--s', 'Color', fa_color,  'LineWidth', 1.5, 'MarkerSize', 5, 'DisplayName', 'P(\geq 1 honest flagged)');
+        plot(ax, matrix_snr*[1 1], [0 1], ':', 'Color', [0.5 0.5 0.5], 'HandleVisibility', 'off');   % SNR of the other tiles
+        style_axes(ax, [min(snr_vals) max(snr_vals)], false, false);
+        ax.FontSize = matrix_font;
+        set_ticks(ax, 'x', snr_vals);
+        set_ticks(ax, 'y', prob_ticks);
+        title(ax, 'Combined detector vs channel SNR', 'FontWeight', 'normal');
+        xlabel(ax, 'channel SNR (dB)');
+        ylabel(ax, 'rate');
+        if show_legend
+            legend(ax, 'Location', 'best', 'FontSize', matrix_font - 2);
+        end
+
+        % Tile 2 -- ROC: all tests on one axes, 'o' at the threshold used in the simulation
+        ax = nexttile(tl);
+        hold(ax, 'on');
+        for s = 1:n_tests
+            [~, ~, Pd, Pf, i_now, ~] = tests{s, :};
+            pd = Pd(:, a, c, agent_db_idx, sensor_idx);
+            pf = Pf(:, a, c, agent_db_idx, sensor_idx);
+            plot(ax, pf, pd, test_styles(s), 'Color', test_colors(s,:), 'LineWidth', 1.5, 'DisplayName', col_title{s}{1});
+            plot(ax, pf(i_now), pd(i_now), 'o', 'Color', test_colors(s,:), 'MarkerFaceColor', test_colors(s,:), 'HandleVisibility', 'off');
+        end
+        plot(ax, [0 1], [0 1], ':', 'Color', [0.6 0.6 0.6], 'HandleVisibility', 'off');   % chance line
+        style_axes(ax, [0 1], log_pf, false);
+        ax.FontSize = matrix_font;
+        if ~log_pf
+            set_ticks(ax, 'x', prob_ticks);
+        end
+        set_ticks(ax, 'y', prob_ticks);
+        title(ax, 'ROC', 'FontWeight', 'normal');
+        xlabel(ax, 'P_f');
+        ylabel(ax, 'P_d');
+        if show_legend
+            legend(ax, 'Location', 'southeast', 'FontSize', matrix_font - 2);
+        end
+
+        % Tiles 3 and 4 -- Pd and Pf vs threshold, side by side
+        for metric = ["P_d", "P_f"]
+            log_y = log_pf && metric == "P_f";
+            tile = 3 + (metric == "P_f");
+            % bottom axes: normcorr vs corr_min
+            [~, grid_vals, Pd, Pf, i_now, xlab] = tests{1, :};
+            P = Pd;
+            if metric == "P_f"
+                P = Pf;
+            end
+            ax = nexttile(tl);
+            hold(ax, 'on');
+            fin = isfinite(grid_vals);   % drop the +/-Inf closure points
+            plot(ax, grid_vals(fin), reshape(P(fin, a, c, agent_db_idx, sensor_idx), [], 1), test_styles(1), ...
+                'Color', test_colors(1,:), 'LineWidth', 1.5, 'DisplayName', col_title{1}{1});
+            plot(ax, grid_vals(i_now)*[1 1], [0 1], ':', 'Color', test_colors(1,:), 'HandleVisibility', 'off');
+            style_axes(ax, [min(grid_vals(fin)) max(grid_vals(fin))], false, log_y);
+            ax.FontSize = matrix_font;
+            set_ticks(ax, 'x', corr_ticks);
+            if ~log_y
+                set_ticks(ax, 'y', prob_ticks);
+            end
+            ax.XColor = test_colors(1,:);
+            ax.Box = 'off';
+            xlabel(ax, xlab + " (normcorr)");
+            ylabel(ax, char(metric));
+
+            % top axes, same tile: alpha / t0 tests vs k
+            ax2 = axes(tl);
+            ax2.Layout.Tile = tile;
+            hold(ax2, 'on');
+            for s = k_tests
                 [~, grid_vals, Pd, Pf, i_now, xlab] = tests{s, :};
-                ax = nexttile(tl);
-                hold(ax, 'on');
-                switch r
-                    case 1
-                        draw_roc(ax, Pd, Pf, i_now, a, agent_db_idx, sensor_idx, snr_vals, snr_colors, log_pf);
-                        ylab = 'P_d';  xl = 'P_f';
-                    case 2
-                        draw_vs_thresh(ax, grid_vals, Pd, i_now, a, agent_db_idx, sensor_idx, snr_vals, snr_colors, false);
-                        ylab = 'P_d';  xl = '';   % shares the x axis with row 3
-                    case 3
-                        draw_vs_thresh(ax, grid_vals, Pf, i_now, a, agent_db_idx, sensor_idx, snr_vals, snr_colors, log_pf);
-                        ylab = 'P_f';  xl = xlab;
+                P = Pd;
+                if metric == "P_f"
+                    P = Pf;
                 end
-                if r == 1
-                    title(ax, col_title{s}, 'FontWeight', 'normal');
-                end
-                if cc == 1
-                    ylabel(ax, {char(row_names(r)), ylab});
-                elseif ~(r == 3 && log_pf)   % log-Pf tiles may not share y limits
-                    ax.YTickLabel = [];
-                end
-                if isempty(xl)
-                    ax.XTickLabel = [];
-                else
-                    xlabel(ax, xl);
-                end
-                if r == 1 && cc == 1
-                    ax_leg = ax;
-                end
+                fin = isfinite(grid_vals);
+                plot(ax2, grid_vals(fin), reshape(P(fin, a, c, agent_db_idx, sensor_idx), [], 1), test_styles(s), ...
+                    'Color', test_colors(s,:), 'LineWidth', 1.5, 'DisplayName', col_title{s}{1});
+                plot(ax2, grid_vals(i_now)*[1 1], [0 1], ':', 'Color', test_colors(s,:), 'HandleVisibility', 'off');
+            end
+            style_axes(ax2, [min(grid_vals(fin)) max(grid_vals(fin))], false, log_y);
+            ax2.FontSize = matrix_font;
+            set_ticks(ax2, 'x', k_ticks);
+            if ~log_y
+                ax2.YTick = prob_ticks;   % same y ticks as the bottom axes (labels hidden below)
+            end
+            grid(ax2, 'off');   % the bottom axes carries the grid
+            ax2.XAxisLocation = 'top';
+            ax2.YAxisLocation = 'right';
+            ax2.YTickLabel = [];
+            ax2.Color = 'none';
+            ax2.Box = 'off';
+            xlabel(ax2, xlab + " (\alpha, t_0)");
+            title(ax2, char(metric + " vs threshold"), 'FontWeight', 'normal');   % on the top axes, above its labels
+            if log_y   % both axes share the y scale (linear limits are already equal, from style_axes)
+                p_all = cellfun(@(T) reshape(T{4}(isfinite(T{2}), a, c, agent_db_idx, sensor_idx), [], 1), ...
+                    num2cell(tests, 2), 'UniformOutput', false);
+                p_all = vertcat(p_all{:});
+                y_lim = [min(p_all(p_all > 0)) / 2, 1.1];
+                ylim(ax, y_lim);
+                ylim(ax2, y_lim);
             end
         end
-        shared_legend(ax_leg, 'Channel SNR', show_legend);
 
         if save_figs
             home_dir = char(java.lang.System.getProperty('user.home'));
@@ -146,7 +250,8 @@ if plot_as_matrix
             if ~exist(save_folder, 'dir')
                 mkdir(save_folder);
             end
-            exportgraphics(fig, fullfile(save_folder, experiment_name + "_roc_matrix_" + R.attacks(a) + "_" + ...
+            exportgraphics(fig, fullfile(save_folder, experiment_name + "_roc_matrix_" + R.attacks(a) + "_channel_" + ...
+                string(matrix_snr) + "_db_agent_" + ...
                 string(R.agent_db_values(agent_db_idx)) + "_db_Tp=" + string(R.Tp) + "_S=" + string(R.sensor_vals(sensor_idx)) + ...
                 "_pf_" + pf_source + ".png"), 'Resolution', 300);
         end
@@ -229,16 +334,22 @@ end
 
 
 %% ---- Local functions ----
-function [tl, fig] = grid_figure(fig_count, rows, cols, ttl)
-% Figure sized to fit the grid on screen, with a tight tiled layout and an overall title.
+function [tl, fig] = grid_figure(fig_count, rows, cols, ttl, show_title)
+% Figure sized to fit the grid on screen, with a tight tiled layout and (unless show_title is false)
+% an overall title and subtitle. ttl{1} also names the figure window.
+    if nargin < 5
+        show_title = true;
+    end
     fig = figure("Name", ttl{1}, "Color", "w");
     scr = get(groot, 'ScreenSize');
     w = min(scr(3) - 80,  230*cols + 170);
     h = min(scr(4) - 140, 200*rows + 120);
     set(fig, 'Position', [40 + 25*fig_count, max(40, scr(4) - h - 90 - 25*fig_count), w, h]);
     tl = tiledlayout(fig, rows, cols, 'TileSpacing', 'tight', 'Padding', 'compact');
-    title(tl, ttl{1}, 'FontWeight', 'bold');
-    subtitle(tl, ttl{2});
+    if show_title
+        title(tl, ttl{1}, 'FontWeight', 'bold');
+        subtitle(tl, ttl{2});
+    end
 end
 
 function draw_roc(ax, Pd, Pf, i_now, a, agent_db_idx, sensor_idx, snr_vals, snr_colors, log_pf)
@@ -263,6 +374,19 @@ function draw_vs_thresh(ax, grid_vals, P, i_now, a, agent_db_idx, sensor_idx, sn
     end
     plot(ax, grid_vals(i_now)*[1 1], [0 1], '--', 'Color', [0.3 0.3 0.3], 'HandleVisibility', 'off');
     style_axes(ax, [min(xv) max(xv)], false, log_y);
+end
+
+function set_ticks(ax, which, ticks)
+% Ticks at every value of `ticks`, labels on every other one (the first, third, ...).
+    lbl = cellstr(compose("%g", ticks(:)));
+    lbl(2:2:end) = {''};
+    if which == 'x'
+        ax.XTick = ticks;
+        ax.XTickLabel = lbl;
+    else
+        ax.YTick = ticks;
+        ax.YTickLabel = lbl;
+    end
 end
 
 function style_axes(ax, x_limits, log_x, log_y)
