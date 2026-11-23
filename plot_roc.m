@@ -47,14 +47,14 @@ nk = numel(R.roc_k_grid);
 sp = find(R.roc_spread_names == "qn", 1);   % alpha / t0 tests use the Qn spread
 
 [~, ic] = min(abs(R.roc_corr_grid - R.corr_min));
-tests = {"normcorr", R.roc_corr_grid, R.roc_corr_det ./ n_atk, R.roc_corr_fa ./ n_hon, ic, 'corr\_min'};
-for param = ["alpha", "t0"]
+tests = {"Cosine similarity", R.roc_corr_grid, R.roc_corr_det ./ n_atk, R.roc_corr_fa ./ n_hon, ic, '\eta_{cs}'};
+for param = ["t0", "alpha"]   % same test order as the other plot scripts: cosine similarity, t0, alpha
     det = R.(char("roc_" + param + "_det"));   % k x spread x attack x channel x agent x sensor
     fa  = R.(char("roc_" + param + "_fa"));
     [~, ik] = min(abs(R.roc_k_grid - R.(char(param + "_delta_k"))));
-    tests(end+1, :) = {param + " (Qn)", R.roc_k_grid, ...
+    tests(end+1, :) = {replace(param, ["alpha", "t0"], ["\alpha", "t_0"]) + " test", R.roc_k_grid, ...   % TeX names
         reshape(det(:, sp, :, :, :, :), [nk det_size]) ./ n_atk, ...
-        reshape(fa(:, sp, :, :, :, :),  [nk det_size]) ./ n_hon, ik, 'k (Qn sigmas)'}; %#ok<SAGROW>
+        reshape(fa(:, sp, :, :, :, :),  [nk det_size]) ./ n_hon, ik, '\kappa_{x}'}; %#ok<SAGROW>
 end
 n_tests = size(tests, 1);
 test_names = string(tests(:, 1));
@@ -85,17 +85,13 @@ for s = 1:n_tests
     end
 end
 
-% Column headers: test name (* = used by the detector) and its current threshold
+% Column headers: test name and its current threshold
 col_title = cell(n_tests, 1);
 for s = 1:n_tests
-    star = "";
-    if in_detector(s)
-        star = " *";
-    end
-    col_title{s} = {char(test_names(s) + star), sprintf('o: %s = %g', tests{s,6}, tests{s,2}(tests{s,5}))};
+    col_title{s} = {char(test_names(s)), sprintf('o: %s = %g', tests{s,6}, tests{s,2}(tests{s,5}))};
 end
 show_idx = 1:n_tests;
-run_info = sprintf('agent SNR %g dB, S = %d, Pf source: %s, * = used by the detector', ...
+run_info = sprintf('agent SNR %g dB, S = %d, Pf source: %s', ...
     R.agent_db_values(agent_db_idx), R.sensor_vals(sensor_idx), pf_source);
 fig_count = 0;
 
@@ -108,8 +104,8 @@ if plot_as_matrix
     if isempty(c)
         error('matrix_snr = %g dB is not in these results (channel SNRs: %s dB).', matrix_snr, mat2str(snr_vals));
     end
-    test_colors = orderedcolors("gem");
-    test_colors = test_colors([1 2 4], :);   % blue, orange, purple (skip the hard-to-see yellow)
+    test_colors = orderedcolors("gem12");
+    test_colors = test_colors([2 1 3], :);   % cosine similarity orange, t0 blue, alpha yellow (as in the other plot scripts)
     test_styles = ["-", "--", "-."];
     k_tests = 2:3;   % tests swept over k (top axis); test 1 (normcorr) is swept over corr_min (bottom axis)
     % Tick positions; set_ticks labels every other one (first, third, ...) to avoid crowding at matrix_font
@@ -145,9 +141,9 @@ if plot_as_matrix
         ax.FontSize = matrix_font;
         set_ticks(ax, 'x', snr_vals);
         set_ticks(ax, 'y', prob_ticks);
-        title(ax, 'Combined detector vs channel SNR', 'FontWeight', 'normal');
-        xlabel(ax, 'channel SNR (dB)');
-        ylabel(ax, 'rate');
+        title(ax, 'Combined detector vs Channel SNR', 'FontWeight', 'normal');
+        xlabel(ax, 'Channel SNR (dB)');
+        ylabel(ax, 'Rate');
         if show_legend
             legend(ax, 'Location', 'best', 'FontSize', matrix_font - 2);
         end
@@ -200,7 +196,7 @@ if plot_as_matrix
             end
             ax.XColor = test_colors(1,:);
             ax.Box = 'off';
-            xlabel(ax, xlab + " (normcorr)");
+            xlabel(ax, '$\eta_{\mathrm{cs}}$', 'Interpreter', 'latex');   % normcorr threshold
             ylabel(ax, char(metric));
 
             % top axes, same tile: alpha / t0 tests vs k
@@ -230,7 +226,7 @@ if plot_as_matrix
             ax2.YTickLabel = [];
             ax2.Color = 'none';
             ax2.Box = 'off';
-            xlabel(ax2, xlab + " (\alpha, t_0)");
+            xlabel(ax2, '$\kappa_{x}$ ($\alpha$, $t_0$)', 'Interpreter', 'latex');   % alpha / t0 test threshold
             title(ax2, char(metric + " vs threshold"), 'FontWeight', 'normal');   % on the top axes, above its labels
             if log_y   % both axes share the y scale (linear limits are already equal, from style_axes)
                 p_all = cellfun(@(T) reshape(T{4}(isfinite(T{2}), a, c, agent_db_idx, sensor_idx), [], 1), ...
@@ -318,18 +314,19 @@ for metric = ["P_f", "P_d"]
 end
 
 %% Tables
-fprintf('\nPf source: %s | agent SNR = %g dB | S = %d | detector uses: normcorr + %s\n', pf_source, ...
-    R.agent_db_values(agent_db_idx), R.sensor_vals(sensor_idx), strjoin(test_names(in_detector & test_names ~= "normcorr"), ' + '));
+plain = @(s) regexprep(s, '[\\{}]', '');   % TeX name -> console text (\eta_{cs} -> eta_cs, \alpha -> alpha)
+fprintf('\nPf source: %s | agent SNR = %g dB | S = %d | detector uses: %s + %s\n', pf_source, ...
+    R.agent_db_values(agent_db_idx), R.sensor_vals(sensor_idx), test_names(1), plain(strjoin(test_names(in_detector & (1:n_tests).' > 1), ' + ')));
 for s = 1:n_tests
-    print_table(sprintf('AUC -- %s (sweep %s)', tests{s,1}, tests{s,6}), auc(:, :, s), R.attacks, snr_vals);
+    print_table(sprintf('AUC -- %s (sweep %s)', plain(tests{s,1}), plain(tests{s,6})), auc(:, :, s), R.attacks, snr_vals);
 end
 
 % Operating point of each test at the thresholds used in the simulation (all attacks, incl. "none")
 op = @(P, i) reshape(P(i, :, :, agent_db_idx, sensor_idx), n_atks, n_snr);
 for s = 1:n_tests
     [name, grid_vals, Pd, Pf, i_now, xlab] = tests{s, :};
-    print_table(sprintf('Pd -- %s at %s = %g', name, xlab, grid_vals(i_now)), op(Pd, i_now), R.attacks, snr_vals);
-    print_table(sprintf('Pf -- %s at %s = %g', name, xlab, grid_vals(i_now)), op(Pf, i_now), R.attacks, snr_vals);
+    print_table(sprintf('Pd -- %s at %s = %g', plain(name), plain(xlab), grid_vals(i_now)), op(Pd, i_now), R.attacks, snr_vals);
+    print_table(sprintf('Pf -- %s at %s = %g', plain(name), plain(xlab), grid_vals(i_now)), op(Pf, i_now), R.attacks, snr_vals);
 end
 
 
@@ -406,6 +403,18 @@ function style_axes(ax, x_limits, log_x, log_y)
     end
 end
 
+function lbl = attack_label(atk)
+% Attack name as shown in the figures (others: title case, "time shift" -> "Time Shift")
+    switch string(atk)
+        case "noise"
+            lbl = "Wideband Jamming";
+        case "sinusoid"
+            lbl = "Narrowband Jamming";
+        otherwise
+            lbl = string(regexprep(char(atk), '(^|\s)(\w)', '$1${upper($2)}'));
+    end
+end
+
 function label_tile(ax, r, c, n_rows, row_name, col_header, xlab, ylab)
 % Column headers on the top row, attack name + y label on the first column, x label on the
 % bottom row; interior tick labels are hidden (all tiles in a row/column share limits).
@@ -413,7 +422,7 @@ function label_tile(ax, r, c, n_rows, row_name, col_header, xlab, ylab)
         title(ax, col_header, 'FontWeight', 'normal');
     end
     if c == 1
-        ylabel(ax, {char(row_name), ylab});
+        ylabel(ax, {char(attack_label(row_name)), ylab});
     else
         ax.YTickLabel = [];
     end

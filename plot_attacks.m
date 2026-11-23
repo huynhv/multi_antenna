@@ -2,7 +2,8 @@ close all
 
 load("multi_antenna_base_results.mat");
 
-params_latex = ["\hat{\alpha}","\hat{t}_0"];
+param_lbl = ["\alpha", "t_0"];   % titles NMSE(\alpha), NMSE(t_0), as in the other plot scripts
+font_size = 12;                  % font size of the axes (legend: 2 pt smaller)
 params_text = ["alpha","t0"];
 
 RGB = orderedcolors("gem12");
@@ -18,13 +19,11 @@ gem12 = containers.Map( ...
     'darkYellow', 'darkPurple', 'darkGreen'}, ...
     num2cell(C, 2));
 
-exclude = all_strats(contains(all_strats, "hetero.") & contains(all_strats, "prop. scaling")); % ["None"];
-
 % Conventional baselines in this results file (set by conventional_methods in multi_antenna.m)
 conv_names = string(fieldnames(avg_dep_mse_conv)).';
 conv_style = containers.Map({'median', 'trimmed_mean', 'skipped_mean', 'skipped_wmean'}, ...
-    {{gem12("orange"), ':x', 'median'}, {gem12("darkGreen"), ':^', 'trimmed mean'}, ...
-     {gem12("cyan"), ':s', 'skipped mean'}, {gem12("darkPurple"), ':d', 'weighted skipped mean'}});
+    {{gem12("orange"), '--d', 'Median'}, {gem12("darkGreen"), '--d', 'Trimmed mean'}, ...
+     {gem12("cyan"), '--d', 'Skipped mean'}, {gem12("darkPurple"), '--d', 'Weighted skipped mean'}});
 
 for agent_db_idx = 1:length(agent_db_values)
     for atk_idx = 1:numel(attacks)
@@ -87,30 +86,33 @@ for agent_db_idx = 1:length(agent_db_values)
                     x_axis_series = channel_db_values(scheme_idx,:,agent_db_idx);
                     plot_line_width = 1.5;
     
-                    plot(ax, x_axis_series,(squeeze(avg_dep_mse(1,agent_db_idx,:,param_idx,scheme_idx,atk_idx))),'-x','color',gem12("blue"),'LineWidth', plot_line_width, 'DisplayName', 'proposed')
-                    
+                    plot_marker_size = 5;
+                    % Same styles and legend order as plot_time_shift / plot_csi: Proposed, Undefended, Oracle, Byzantine-Free, baselines
+                    plot(ax, x_axis_series,(squeeze(avg_dep_mse(1,agent_db_idx,:,param_idx,scheme_idx,atk_idx))),'-o','color',gem12("blue"),'LineWidth', plot_line_width, 'MarkerSize', plot_marker_size, 'DisplayName', 'Proposed')
+
                     % plot(ax, x_axis_series,(squeeze(avg_dep_var(strat_idx,agent_db_idx,:,param_idx,scheme_idx,atk_idx,1))),'-^','color',colorMap(iter_key),'LineWidth', plot_line_width)
                     % plot(ax, x_axis_series,(squeeze(avg_dep_crlb(strat_idx,agent_db_idx,:,param_idx,scheme_idx,atk_idx,1))),'--o','color',colorMap(iter_key),'LineWidth', plot_line_width)
                     if attacker_enabled
-                        plot(ax, x_axis_series,(squeeze(avg_dep_mse_undefended(1,agent_db_idx,:,param_idx,scheme_idx,atk_idx))),':x','color',gem12("purple"),'LineWidth', plot_line_width, 'DisplayName', 'undefended')
-                        plot(ax, x_axis_series,(squeeze(avg_dep_mse_full_honest(1,agent_db_idx,:,param_idx,scheme_idx,atk_idx))),':x','color',gem12("magenta"),'LineWidth', plot_line_width, 'DisplayName', 'attack-free')
+                        plot(ax, x_axis_series,(squeeze(avg_dep_mse_oracle(1,agent_db_idx,:,param_idx,scheme_idx,atk_idx))),'-^','color',gem12("green"),'LineWidth', plot_line_width, 'MarkerSize', plot_marker_size, 'DisplayName', 'Oracle')
                         for cn = conv_names
                             st = conv_style(char(cn));   % {colour, line style, legend name}
                             plot(ax, x_axis_series,(squeeze(avg_dep_mse_conv.(char(cn))(1,agent_db_idx,:,param_idx,scheme_idx,atk_idx))), ...
-                                st{2},'color',st{1},'LineWidth', plot_line_width, 'DisplayName', st{3})
+                                st{2},'color',st{1},'LineWidth', plot_line_width, 'MarkerSize', plot_marker_size, 'DisplayName', st{3})
                         end
-                        plot(ax, x_axis_series,(squeeze(avg_dep_mse_oracle(1,agent_db_idx,:,param_idx,scheme_idx,atk_idx))),':x','color',gem12("green"),'LineWidth', plot_line_width, 'DisplayName', 'oracle')
+                        plot(ax, x_axis_series,(squeeze(avg_dep_mse_undefended(1,agent_db_idx,:,param_idx,scheme_idx,atk_idx))),'-s','color',gem12("purple"),'LineWidth', plot_line_width, 'MarkerSize', plot_marker_size, 'DisplayName', 'Undefended')
                         
+                        plot(ax, x_axis_series,(squeeze(avg_dep_mse_full_honest(1,agent_db_idx,:,param_idx,scheme_idx,atk_idx))),':','color',gem12("magenta"),'LineWidth', plot_line_width, 'DisplayName', 'Byzantine-Free')
+
                         % plot(ax, x_axis_series,(squeeze(avg_dep_mse_basis_supp(1,agent_db_idx,:,param_idx,scheme_idx,atk_idx,1))),':x','color',gem12("green"),'LineWidth', plot_line_width)
                         % plot(ax, x_axis_series,(squeeze(avg_dep_crlb_oracle(1,agent_db_idx,:,param_idx,scheme_idx,atk_idx,1))),':o','color','magenta','LineWidth', plot_line_width)
                     end
     
                     xlabel('Channel SNR (dB)')
-                    ylabel(" ")
-    
-                    title('$$'+params_latex(param_idx)+'$$','Interpreter','latex')
-    
-                    ax.FontSize = 15;          % font size
+                    ylabel('Normalized MSE')
+
+                    title(sprintf('NMSE(%s)', param_lbl(param_idx)), 'FontWeight', 'normal')
+
+                    ax.FontSize = font_size;   % font size
                     ax.YScale = 'log';          % log scale if needed
                     grid(ax, 'on');             % turn on grid
                     box(ax, 'on');              % border on all four sides
@@ -122,7 +124,7 @@ for agent_db_idx = 1:length(agent_db_values)
                     ax.XTick = channel_snr;
 
                     if param_idx == 1
-                        legend("Location","best")
+                        legend("Location","best", "FontSize", font_size - 2)
                     end
 
                     home_dir = char(java.lang.System.getProperty('user.home'));

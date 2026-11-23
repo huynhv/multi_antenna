@@ -2,7 +2,7 @@
 % Run standalone, or after multi_antenna.m with experiment_list = "csi_sensitivity". Loads every
 % csi_sensitivity_*_results.mat in the current folder (one file per CSI level); perfect CSI
 % (NMSE = -Inf) is drawn at the left end of the x-axis and labelled "perfect".
-%   Figure 1: normalized MSE (columns t0, alpha) vs CSI NMSE for the estimators in show_methods, one row
+%   Figure 1: normalized MSE (columns alpha, t0) vs CSI NMSE for the estimators in show_methods, one row
 %             per channel SNR in show_snr.
 %             A dashed vertical line marks the worst CSI at which the proposed t0 NMSE is still within
 %             oracle_tol of the oracle.
@@ -22,12 +22,12 @@ attack       = "noise";   % attack to plot (must be in csi_attacks of the run)
 oracle_tol   = 0.10;      % "near-oracle": proposed t0 NMSE <= (1 + oracle_tol) x oracle
 log_pf       = false;     % true: log-scale Pf axis (points with Pf = 0 are then not drawn)
 show_snr     = 5;         % channel SNR(s) (dB) to draw and tabulate, any of those in the run (one row each)
-leg_tile     = 1;         % Figure 1 tile that holds the legend: 1 = NMSE(t0), 2 = NMSE(alpha)
+leg_tile     = 1;         % Figure 1 tile that holds the legend: 1 = NMSE(alpha), 2 = NMSE(t0)
 font_size    = 12;        % font size of all axes (legends: 2 pt smaller)
 save_figs    = true;      % save each figure as a 300 dpi PNG to ~\Desktop\Byzantine AirComp Results\csi_sensitivity\
-show_methods = ["Proposed", "Oracle", "median"];   % estimators drawn in Figure 1, any of: "Proposed",
-                          % "Undefended", "Oracle", "Full honest", and the conventional baselines of the run
-                          % ("median", "trimmed mean", "skipped mean", "skipped wmean")
+show_methods = ["Proposed", "Oracle", "Median"];   % estimators drawn in Figure 1 (case-insensitive), any of:
+                          % "Proposed", "Undefended", "Oracle", "Byzantine-Free", and the conventional baselines of
+                          % the run ("Median", "Trimmed mean", "Skipped mean", "Weighted skipped mean")
 agent_db_idx = 1;
 sensor_idx   = 1;
 scheme_idx   = 1;
@@ -58,7 +58,7 @@ x_pos = csi_db;
 x_pos(~fin) = min(csi_db(fin)) - step;
 x_labels = compose("%g", csi_db);
 x_labels(~fin) = "perfect";
-run_info = sprintf('attack: %s, compromised %s of S = %d | agent SNR %g dB | %d deployments x %d trials | detector: normcorr + %s', ...
+run_info = sprintf('attack: %s, compromised %s of S = %d | agent SNR %g dB | %d deployments x %d trials | detector: cosine similarity + %s', ...
     attack, mat2str(R1.pivot_atk{a_idx}), R1.sensor_vals(sensor_idx), R1.agent_db_values(agent_db_idx), ...
     R1.nDeployments_total, R1.det_ntrials(a_idx, 1, agent_db_idx, sensor_idx) / R1.nDeployments_total, upper(R1.detector_spread));
 
@@ -68,18 +68,20 @@ methods = {
     'Proposed',    'avg_dep_mse',             C(1,:), '-o'
     'Undefended',  'avg_dep_mse_undefended',  C(4,:), '-s'
     'Oracle',      'avg_dep_mse_oracle',      C(5,:), '-^'
-    'Full honest', 'avg_dep_mse_full_honest', C(7,:), ':'
+    'Byzantine-Free', 'avg_dep_mse_full_honest', C(7,:), ':'
     };
 conv_names = string(fieldnames(R1.avg_dep_mse_conv)).';
-conv_cols  = C([2 6 11 12], :);
+conv_style = containers.Map({'median', 'trimmed_mean', 'skipped_mean', 'skipped_wmean'}, ...   % same as plot_attacks
+    {{C(2,:), 'Median'}, {C(12,:), 'Trimmed mean'}, {C(6,:), 'Skipped mean'}, {C(11,:), 'Weighted skipped mean'}});
 for q = 1:numel(conv_names)
-    methods(end+1, :) = {char(replace(conv_names(q), "_", " ")), "conv:" + conv_names(q), conv_cols(q,:), '--d'}; %#ok<SAGROW>
+    st = conv_style(char(conv_names(q)));   % {colour, legend name}
+    methods(end+1, :) = {st{2}, "conv:" + conv_names(q), st{1}, '--d'}; %#ok<SAGROW>
 end
-unknown = setdiff(show_methods, string(methods(:,1)));
+unknown = setdiff(lower(show_methods), lower(string(methods(:,1))));
 if ~isempty(unknown)
     error('show_methods: not available in these results: %s (available: %s).', strjoin(unknown, ', '), strjoin(string(methods(:,1)), ', '));
 end
-methods = methods(ismember(string(methods(:,1)), show_methods), :);
+methods = methods(ismember(lower(string(methods(:,1))), lower(show_methods)), :);
 mse_of = @(R, fld, prm, c) get_mse(R, fld, agent_db_idx, c, prm, scheme_idx, a_idx, sensor_idx) / norm_coeffs(prm);
 across = @(fld, prm, c) cellfun(@(R) mse_of(R, fld, prm, c), L);   % 1 x n_lev
 
@@ -88,19 +90,18 @@ across = @(fld, prm, c) cellfun(@(R) mse_of(R, fld, prm, c), L);   % 1 x n_lev
 [~, ika] = min(abs(R1.roc_k_grid - R1.alpha_delta_k));
 [~, ikt] = min(abs(R1.roc_k_grid - R1.t0_delta_k));
 sp  = find(R1.roc_spread_names == R1.detector_spread, 1);
-spd = replace(upper(R1.detector_spread), ["SN", "QN"], ["Sn", "Qn"]);
 n_atk = @(R, c) R.roc_n_atk(a_idx, c, agent_db_idx, sensor_idx);
 n_hon = @(R, c) R.roc_n_hon(a_idx, c, agent_db_idx, sensor_idx);
 tests = {
     'Combined detector', @(R,c) R.det_tp(a_idx,c,agent_db_idx,sensor_idx) / (R.det_tp(a_idx,c,agent_db_idx,sensor_idx) + R.det_fn(a_idx,c,agent_db_idx,sensor_idx)), ...
                          @(R,c) R.det_fp(a_idx,c,agent_db_idx,sensor_idx) / n_hon(R,c), [0 0 0]
-    sprintf('normcorr (corr_{min} = %g)', R1.corr_min), ...
+    'Cosine similarity', ...
                          @(R,c) R.roc_corr_det(ic,a_idx,c,agent_db_idx,sensor_idx) / n_atk(R,c), ...
                          @(R,c) R.roc_corr_fa(ic,a_idx,c,agent_db_idx,sensor_idx) / n_hon(R,c), C(2,:)
-    sprintf('t_0 test (%s, k = %g)', spd, R1.t0_delta_k), ...
+    't_0 test', ...
                          @(R,c) R.roc_t0_det(ikt,sp,a_idx,c,agent_db_idx,sensor_idx) / n_atk(R,c), ...
                          @(R,c) R.roc_t0_fa(ikt,sp,a_idx,c,agent_db_idx,sensor_idx) / n_hon(R,c), C(1,:)
-    sprintf('\\alpha test (%s, k = %g)', spd, R1.alpha_delta_k), ...
+    '\alpha test', ...
                          @(R,c) R.roc_alpha_det(ika,sp,a_idx,c,agent_db_idx,sensor_idx) / n_atk(R,c), ...
                          @(R,c) R.roc_alpha_fa(ika,sp,a_idx,c,agent_db_idx,sensor_idx) / n_hon(R,c), C(3,:)
     };
@@ -122,7 +123,7 @@ end
 
 %% Figure 1: normalized MSE vs CSI NMSE (columns: t0, alpha; rows: channel SNR)
 [tl, fig1] = grid_figure(1, numel(snr_idx), 2, {'Imperfect CSI: normalized MSE vs CSI NMSE', run_info});
-cols = [2 1];   % t0 first
+cols = [1 2];   % alpha first, as in the other plot scripts
 for c = snr_idx
     for r = 1:2
         prm = cols(r);
@@ -139,7 +140,7 @@ for c = snr_idx
             title(ax, sprintf('NMSE(%s)', param_lbl(prm)), 'FontWeight', 'normal');
         end
         if r == 1
-            ylabel(ax, {sprintf('%g dB channel SNR', snr_vals(c)), 'normalized MSE'});
+            ylabel(ax, 'Normalized MSE');
         end
         if c == snr_idx(end)
             xlabel(ax, 'CSI NMSE (dB)');
@@ -152,7 +153,7 @@ end
 
 %% Figure 2: Pd and Pf vs CSI NMSE (columns: Pd, Pf; rows: channel SNR)
 [tl, fig2] = grid_figure(2, numel(snr_idx), 2, {'Imperfect CSI: detection vs CSI NMSE', run_info});
-rate_lbl = ["P_d (per sensor)", "P_f (per sensor)"];
+rate_lbl = ["P_d", "P_f"];
 for c = snr_idx
     for col = 1:2   % 1: Pd, 2: Pf
         ax = nexttile(tl);
@@ -173,7 +174,7 @@ for c = snr_idx
             title(ax, rate_lbl(col), 'FontWeight', 'normal');
         end
         if col == 1
-            ylabel(ax, {sprintf('%g dB channel SNR', snr_vals(c)), 'rate'});
+            ylabel(ax, 'Rate');
         end
         if c == snr_idx(end)
             xlabel(ax, 'CSI NMSE (dB)');

@@ -3,7 +3,7 @@
 % one agent SNR and one channel SNR).
 % Two figures per group of attacks in attack_groups (columns = the group's attacks):
 %   Detection: rows Pd / Pf, x = number of attackers n. Pd and Pf per test at the simulation's
-%             thresholds; dashed Pf = combined, no attack.
+%             thresholds.
 %   ROC:      rows = tests, one curve per n, 'o' at the current threshold.
 % Attacks in hide_attacks are left out of every figure.
 % A dotted vertical line marks n = S/2, where the robust median/spread estimates break down.
@@ -18,6 +18,7 @@ experiment_name = erase(string(results_file), "_results.mat");   % used in the s
 
 font_size  = 12;     % font size of all axes (legends: 2 pt smaller)
 save_figs  = true;   % save each figure as a 300 dpi PNG to ~\Desktop\Byzantine AirComp Results\<experiment>\
+cos_ylabel_shift = 0.1;   % ROC figures: move the "Cosine similarity / P_d" y-label up by this much (y-axis units)
 hide_attacks = ["peak"];   % attacks left out of every figure (still in the table)
 attack_groups = {["noise", "sinusoid"], ["flip", "time shift"]};   % one detection + one ROC figure per group, columns = attacks
 
@@ -29,20 +30,18 @@ if ~isempty(missing)
     error('attack_groups attack(s) not in these results: %s (attacks: %s).', strjoin(missing, ', '), strjoin(R.ac_attacks, ', '));
 end
 attack_groups = attack_groups(~cellfun(@isempty, attack_groups));
-p_none   = find(R.pivot_types == "none", 1);
 pivot_of = @(a, n) find(R.pivot_types == a & R.pivot_n == n, 1);   % sweep entry of (attack, n)
 S        = R.sensor_vals(1);
 C        = orderedcolors("gem12");
-run_info = sprintf('sensors 1..n compromised of S = %d | agent SNR %g dB, channel SNR %g dB | detector: normcorr + %s (k = %g / %g), corr_{min} = %g', ...
+run_info = sprintf('sensors 1..n compromised of S = %d | agent SNR %g dB, channel SNR %g dB | detector: cosine similarity + %s (k = %g / %g), corr_{min} = %g', ...
     S, R.ac_agent_db, R.ac_channel_snr, upper(R.detector_spread), R.alpha_delta_k, R.t0_delta_k, R.corr_min);
 
 [~, ic]  = min(abs(R.roc_corr_grid - R.corr_min));
 [~, ika] = min(abs(R.roc_k_grid - R.alpha_delta_k));
 [~, ikt] = min(abs(R.roc_k_grid - R.t0_delta_k));
 sp = find(R.roc_spread_names == R.detector_spread, 1);
-spd = replace(upper(R.detector_spread), ["SN", "QN"], ["Sn", "Qn"]);
 
-% Rates of one sweep entry p: Pd and Pf for {combined, normcorr, t0 test, alpha test}
+% Rates of one sweep entry p: Pd and Pf for {combined, cosine similarity, t0 test, alpha test}
 n_atk = @(p) R.roc_n_atk(p, 1, 1, 1);
 n_hon = @(p) R.roc_n_hon(p, 1, 1, 1);
 pd_of = @(p) [R.det_tp(p,1,1,1) / (R.det_tp(p,1,1,1) + R.det_fn(p,1,1,1)), ...
@@ -53,11 +52,17 @@ pf_of = @(p) [R.det_fp(p,1,1,1) / n_hon(p), ...
               R.roc_corr_fa(ic, p, 1, 1, 1) / n_hon(p), ...
               R.roc_t0_fa(ikt, sp, p, 1, 1, 1) / n_hon(p), ...
               R.roc_alpha_fa(ika, sp, p, 1, 1, 1) / n_hon(p)];
-test_names  = {'Combined detector', 'normcorr', sprintf('t_0 test (%s)', spd), sprintf('\\alpha test (%s)', spd)};
+test_names  = {'Combined detector', 'Cosine similarity', 't_0 test', '\alpha test'};
 test_colors = [0 0 0; C(2,:); C(1,:); C(3,:)];
+test_markers = {'o', 's', '^', 'x'};   % open markers, largest drawn first, so overlapping traces stay visible
+test_msizes  = [10 8 6 5];
 
 %% Detection figures (one per group in attack_groups): Pd and Pf vs number of attackers
-row_lbl = ["P_d (per sensor)", "P_f (per sensor)"];
+row_lbl = ["P_d", "P_f"];
+% Attack names as shown in the figures (others: title case, "time shift" -> "Time Shift")
+atk_display = dictionary(["noise", "sinusoid"], ["Wideband Jamming", "Narrowband Jamming"]);
+cap = @(s) string(regexprep(char(s), '(^|\s)(\w)', '$1${upper($2)}'));
+atk_lbl = @(s) atk_display.lookup(string(s), FallbackValue=cap(s));
 det_figs = cell(1, numel(attack_groups));
 for g = 1:numel(attack_groups)
     atks = attack_groups{g};
@@ -77,11 +82,7 @@ for g = 1:numel(attack_groups)
                 end
             end
             for k = 1:4
-                plot(ax, n_vals, P(:,k), '-o', 'Color', test_colors(k,:), 'LineWidth', 1.5, 'MarkerSize', 5, 'DisplayName', test_names{k});
-            end
-            if row == 2
-                pf_none = pf_of(p_none);
-                yline(ax, pf_none(1), '--', 'Color', [0 0 0], 'DisplayName', 'Combined P_f, no attack');
+                plot(ax, n_vals, P(:,k), '-', 'Marker', test_markers{k}, 'Color', test_colors(k,:), 'LineWidth', 1.5, 'MarkerSize', test_msizes(k), 'DisplayName', test_names{k});
             end
             xline(ax, S/2, ':', 'Color', [0.4 0.4 0.4], 'HandleVisibility', 'off');
             xlim(ax, [min(n_vals) - 0.3, max(n_vals) + 0.3]);
@@ -90,14 +91,12 @@ for g = 1:numel(attack_groups)
             set_ticks(ax, 'y', 0:0.25:1);
             grid(ax, 'on');
             box(ax, 'on');
-            if row == 1
-                title(ax, atks(a), 'FontWeight', 'normal');
-            end
+            title(ax, atk_lbl(atks(a)) + ", " + row_lbl(row), 'FontWeight', 'normal');
             if a == 1
-                ylabel(ax, row_lbl(row));
+                ylabel(ax, 'Rate');
             end
             if row == 2
-                xlabel(ax, 'compromised sensors n');
+                xlabel(ax, 'Compromised sensors n');
             end
             if a == numel(atks)   % legend inside the rightmost plot of each row (each row has its own entries)
                 legend(ax, 'Location', 'best', 'FontSize', font_size - 2);
@@ -108,9 +107,9 @@ end
 
 %% ROC figures (one per group in attack_groups): one curve per number of attackers
 roc_tests = {
-    'normcorr',                         @(p) R.roc_corr_det(:, p, 1, 1, 1) / n_atk(p),          @(p) R.roc_corr_fa(:, p, 1, 1, 1) / n_hon(p),          ic
-    sprintf('\\alpha test (%s)', spd),  @(p) R.roc_alpha_det(:, sp, p, 1, 1, 1) / n_atk(p),     @(p) R.roc_alpha_fa(:, sp, p, 1, 1, 1) / n_hon(p),     ika
-    sprintf('t_0 test (%s)', spd),      @(p) R.roc_t0_det(:, sp, p, 1, 1, 1) / n_atk(p),        @(p) R.roc_t0_fa(:, sp, p, 1, 1, 1) / n_hon(p),        ikt
+    'Cosine similarity',                @(p) R.roc_corr_det(:, p, 1, 1, 1) / n_atk(p),          @(p) R.roc_corr_fa(:, p, 1, 1, 1) / n_hon(p),          ic
+    't_0 test',                         @(p) R.roc_t0_det(:, sp, p, 1, 1, 1) / n_atk(p),        @(p) R.roc_t0_fa(:, sp, p, 1, 1, 1) / n_hon(p),        ikt
+    '\alpha test',                      @(p) R.roc_alpha_det(:, sp, p, 1, 1, 1) / n_atk(p),     @(p) R.roc_alpha_fa(:, sp, p, 1, 1, 1) / n_hon(p),     ika
     };
 n_colors = parula(numel(n_vals) + 1);
 n_tests  = size(roc_tests, 1);
@@ -140,10 +139,13 @@ for g = 1:numel(attack_groups)
             grid(ax, 'on');
             box(ax, 'on');
             if k == 1
-                title(ax, atks(a), 'FontWeight', 'normal');
+                title(ax, atk_lbl(atks(a)), 'FontWeight', 'normal');
             end
             if a == 1
-                ylabel(ax, {roc_tests{k,1}, 'P_d'});
+                yl = ylabel(ax, {roc_tests{k,1}, 'P_d'});
+                if k == 1   % the long "Cosine similarity" label sits low; nudge it up (data units)
+                    yl.Position(2) = yl.Position(2) + cos_ylabel_shift;
+                end
             end
             if k == n_tests
                 xlabel(ax, 'P_f');
