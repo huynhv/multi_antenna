@@ -3,6 +3,7 @@
 % Clear all variables and close all existing figures.
 clearvars
 close all
+script_tic = tic;   % whole-script runtime, printed at the end
 
 addpath('.\functions')
 verbosity_level = 5;   % 1 = major sections only, 2 = + sub-steps/channel-SNR, 3 = + diagnostics
@@ -13,7 +14,7 @@ rng(seed);
 
 use_W = true;
 
-nDeployments_total = 20;   % total deployments to simulate
+nDeployments_total = 100;   % total deployments to simulate
 dep_batch_size     = 10; % 10;    % deployments held in memory at once (~3-4 GB per batch of 10)
 % Set the number of measurements per sensor, starting from 0
 K = 301;
@@ -73,10 +74,10 @@ shadow_sigma_dB = 0.1;
 m_ref = 1;              % reference amplitude at distance min_ti
 c_gain = m_ref * min_ti^path_loss_exp;   % anchors: unshadowed mi = m_ref at d = min_ti
 
-all_di = sort(unifrnd(min_ti, max_ti, 1, S_max, 1, 1, nDeployments_total), 2, 'ascend');
+all_di = unifrnd(min_ti, max_ti, 1, S_max, 1, 1, nDeployments_total);
 
 shadowing = 10.^(shadow_sigma_dB/20 * randn(1,S_max,1,1,nDeployments_total));
-all_mi_total = c_gain ./ (all_di.^path_loss_exp) .* shadowing;
+all_mi_total = sort(c_gain ./ (all_di.^path_loss_exp) .* shadowing, 2, 'descend');
 
 %%
 selected_schemes = "EPC";
@@ -91,13 +92,13 @@ norm_fact = 1;
 epsilon = 1e-4;
 Bee = pi/Tp;
 
-% Set maximum value of t0 such that the signal from each sensor is guaranteed to
-% be in the interior of the observation period.
-t0_max = T0-Tp-max_ti;
-
-if t0_true > t0_max
-    error("True value of t0 exceeds maximum!")
-end
+% % Set maximum value of t0 such that the signal from each sensor is guaranteed to
+% % be in the interior of the observation period.
+% t0_max = T0-Tp-max_ti;
+% 
+% if t0_true > t0_max
+%     error("True value of t0 exceeds maximum!")
+% end
 
 % Keep event timing on the sample grid (avoids a t0-MSE floor of ~(dt/2)^2
 % and interpolated time-shift attacks).
@@ -108,34 +109,34 @@ assert(on_grid(Tp),      'Tp = %g is not a multiple of dt = %g', Tp, dt);
 %% Byzantine attacker configuration
 attacker_enabled = true;
 attacker_idx     = [1,2,3]; % [2,4]      % sensor index/indices (within 1:S) that are compromised
-attacker_db      = 0;      % attacker "SNR", same convention as agent_db (see below)
 attacker_seed = 42;
 % Attack-specific parameters (each is used only by its attack type)
 attacker_beta = 0.1;   % "amplitude scale": attacker transmits beta * u_i(t)
-inside_edge_time_val = T0-Tp;
-t0_attacker   = inside_edge_time_val;     % "time shift": attacker's pulse is moved to start at t0_attacker
+t0_attacker   = T0-Tp;     % "time shift": attacker's pulse is moved to start at t0_attacker
 % Attack model for the waveform attacks ("noise", "sinusoid", "peak"):
 %   true  (in-band, measurement falsification): the waveform is the compromised agent's spoofed OBSERVATION
 %         x_i(t); the agent still follows the transmit protocol, so it sends the matched-filter output of
 %         x_i, which is confined to the honest signal band (same spectrum |S0|^2 as honest data).
 %   false (broadband): the waveform is injected directly as the transmitted u_i(t), bypassing the matched
 %         filter (energy across the whole sampled band).
-% Either way the transmitted waveform is normalized to the same energy, so only its spectrum differs.
-% "flip", "amplitude scale" and "time shift" transform the honest u_i and are in-band in both models.
+% Either way the transmitted waveform is scaled to the energy of the honest u_i it replaces (per sensor,
+% trial and deployment), so the attack differs from honest data only in shape and spectrum.
+% "flip", "amplitude scale" and "time shift" act on the agent's observation x_i before its matched filter,
+% so they are in-band in both models. "time shift" moves x_i by whole samples inside its own window and
+% refills the vacated samples with fresh sensor noise; "flip" and "amplitude scale" are applied to u_i directly (identical, since the MF is linear).
 attack_inband = true;
 
 % Time-shift sensitivity experiment (experiment_list = "time_shift_sensitivity"): one time-shift attack
 % per multiple n, with the attacker's pulse moved to t0_true + n*ts_delta. A no-attack reference
-% ("none") is added automatically. Fractional n gives sub-sample shifts (linear interpolation of the
-% smooth matched-filter output in shift_waveform).
+% ("none") is added automatically. n*ts_delta must be a whole number of samples (checked below).
 ts_delta     = dt;                                % Delta = one sample
-ts_multiples = [0.25 0.5 1 2 4 8 16 32 64];       % n
+ts_multiples = [1 2 4 8 16 32 64];                % n
 ts_channel_snr = 5;                               % channel SNR(s) (dB)
 
 % Attacker-count experiment (experiment_list = "attacker_count"): DETECTION ONLY (Pd/Pf, ROC counts,
 % no estimation) at one agent SNR and one channel SNR, with sensors 1..n compromised for each n.
 ac_counts      = 1:5;
-ac_attacks     = ["noise", "sinusoid", "peak", "flip", "time shift"];
+ac_attacks     = ["noise", "sinusoid", "flip", "time shift"];
 ac_agent_db    = 0;     % agent SNR (dB)
 ac_channel_snr = 5;     % channel SNR (dB)
 
@@ -197,9 +198,6 @@ t0_grid_top = reshape(t,1,1,[]);
 D_template = reshape(R00_full(:,:,:,1), K, K);   % K x K, [D_template]_{k,l} = rho(t_k - t_l)
 
 [U_D, Sigma_D, ~] = svd(D_template, 'econ');
-% sv_energy = cumsum(diag(Sigma_D).^2) / sum(diag(Sigma_D).^2);
-% d_sub = find(sv_energy >= 0.999, 1, 'first');
-% Phi = U_D(:, 1:d_sub);           % K x d_sub: honest-signal subspace
 
 % Eigenvalues of D_template itself (already computed via U_D/Sigma_D above)
 lam_D = diag(Sigma_D);   % K x 1
@@ -215,21 +213,16 @@ D_deriv(:, K)     = (D_template(:, K) - D_template(:, K-1)) / dt;
 D_deriv_v = U_D.' * D_deriv;          % K x K
 mfTemplateFFT_raw = fft(sensor_signal(t, Tp, norm_fact), N, 1);   % used by estimate_with_geometry
 
-% log_msg(verbosity_level, 1, 'Subspace-projection residual test: d = %d, K-d = %d', d_sub, K-d_sub);
-
 %% Define Anonymous Expressions
 mag_sqr_S0_internal = @(w) (norm_fact^2) * (2*Bee.^2 .* (1 + cos(w.*pi./Bee)) ) ./ (w.^2 - Bee.^2).^2;
 mag_sqr_S0 = @(w) zeroIfnan(mag_sqr_S0_internal(w)) + (w == Bee | w == -Bee) .* (mag_sqr_S0_internal(w-epsilon) + mag_sqr_S0_internal(w+epsilon))./2;
 
 %%% Expressions for multi-antenna
 Vm_arr_internal = @(w, lambda) lambda .* mag_sqr_S0_internal(w) + 1;
-Vm_arr = @(w, lambda) zeroIfnan(Vm_arr_internal(w, lambda)) + (w == Bee | w == -Bee) .* (Vm_arr_internal(w-epsilon, lambda) + Vm_arr_internal(w+epsilon, lambda))./2;
 
 Hm_arr_internal = @(w, lambda) (1 + epsilon) ./ (Vm_arr_internal(w, lambda) + epsilon);
 Hm_arr = @(w, lambda) zeroIfnan(Hm_arr_internal(w, lambda)) + (w == Bee | w == -Bee) .* (Hm_arr_internal(w-epsilon, lambda) + Hm_arr_internal(w+epsilon, lambda))./2;
 
-% alpha_branch_fisher = @(bm, lambda) integral(@(w) bm.^2 .* mag_sqr_S0(w).^2 ./ Vm_arr(w, lambda), -Inf, Inf, 'ArrayValued', true);
-% t0_branch_fisher = @(bm, lambda) integral(@(w) bm.^2 .* (w .* mag_sqr_S0(w)).^2 ./ Vm_arr(w, lambda), -Inf, Inf, 'ArrayValued', true);
 
 %% CSI-error directions z (one per sensor, antenna and deployment), drawn from their own stream and
 % restoring the global one, so every other random quantity is unchanged by the CSI experiment.
@@ -239,7 +232,8 @@ all_zi_total = (randn(size(all_gi_total)) + 1i*randn(size(all_gi_total)))/sqrt(2
 rng(rng_state);
 
 %% Define experiment list
-experiment_list = "multi_antenna_base";   % any of "multi_antenna_base", "time_shift_sensitivity", "attacker_count", "csi_sensitivity"
+% experiment_list = ["multi_antenna_base"];   % any of "multi_antenna_base", "time_shift_sensitivity", "attacker_count", "csi_sensitivity"
+experiment_list = ["multi_antenna_base", "time_shift_sensitivity", "attacker_count", "csi_sensitivity"];
 
 % One run per experiment, except "csi_sensitivity", which runs once per CSI level in csi_nmse_db_list.
 run_experiment = strings(1, 0);
@@ -285,12 +279,12 @@ for experiment_idx = 1:numel(run_experiment)
     channel_snr = linspace(0,10,5);
 
     % Attacks to test -- each runs the full Monte Carlo sweep. Valid names are listed below.
-    attacks = ["time shift"];
+    attacks = ["none", "noise", "sinusoid", "flip", "time shift"];
     if experiment == "csi_sensitivity"
         attacks = csi_attacks;
     end
 
-    valid_attacks = ["none", "noise", "sinusoid", "peak", "flip", "time shift", "amplitude scale"];
+    valid_attacks = ["none", "noise", "sinusoid", "peak", "flip", "time shift"];
     attacks = unique(attacks, 'stable');   % no duplicate runs
     if isempty(attacks)
         error("No attack type has been specified!")
@@ -347,6 +341,11 @@ for experiment_idx = 1:numel(run_experiment)
         pivot_atk = repmat({attacker_idx}, 1, numel(attacks));
         pivot_n   = repmat(numel(attacker_idx), 1, numel(attacks));
     end
+    % The time-shift attacker moves samples inside its observation vector, so shifts must be whole samples.
+    ts_bad = pivot_shift(pivot_types == "time shift" & ~on_grid(pivot_shift));
+    if ~isempty(ts_bad)
+        error("Time shift(s) %s s are not whole multiples of dt = %g s (the attack shifts by whole samples).", mat2str(ts_bad, 4), dt);
+    end
     pivot_vals = attacks;
     
     constraints = "none";
@@ -387,7 +386,6 @@ for experiment_idx = 1:numel(run_experiment)
     rho_empirical_mse_full_honest = rho_crlb;   % Full S-sensor array, attacker never hijacked anyone -- "what if there had been no attack at all"
     rho_empirical_mse_undefended = rho_crlb;   % MSE with NO defense applied -- only meaningful/populated under attack
     rho_empirical_mse_oracle = rho_crlb;   % MSE with attacker PERFECTLY, freely removed -- upper bound, only under attack
-    rho_empirical_mse_basis_supp = rho_crlb;
     rho_mse_conv = struct();   % one MSE array per conventional baseline (same layout as rho_empirical_mse)
     for cm = conventional_methods
         rho_mse_conv.(char(cm)) = rho_crlb;
@@ -444,7 +442,12 @@ for experiment_idx = 1:numel(run_experiment)
         % are listed or in what order.
         f_nominal = Bee/(2*pi);   % = 1/(2*Tp), reference frequency near the honest passband
         attack_waveforms = cell(numel(pivot_vals), 1);   % unit-energy K x S_max x 1 x nTrials x D, or [] if unused
+        attack_fill_noise = cell(numel(pivot_vals), 1);  % "time shift": unit-variance noise for the vacated part of x_i
         for pivot_idx = 1:numel(pivot_vals)
+            if pivot_types(pivot_idx) == "time shift"   % fresh sensor noise for the part of x_i the shift vacates
+                rng(attacker_seed + batch_idx);
+                attack_fill_noise{pivot_idx} = randn(K,S_max,1,nTrials,nDeployments);
+            end
             if pivot_types(pivot_idx) == "noise"
                 rng(attacker_seed + batch_idx);   % fresh attack noise for each batch of deployments
             else
@@ -480,16 +483,12 @@ for experiment_idx = 1:numel(run_experiment)
             if ~isempty(wf) && attack_inband   % spoofed observation -> the agent transmits its matched-filter output
                 [~, wf] = mf_integral_fft(wf, sensor_signal(t, Tp, norm_fact), 1, 1, K, dt, Tp);
             end
-            if ~isempty(wf)   % normalize to unit total (dt-weighted) energy per slot
-                wf = wf ./ sqrt(sum(wf(:,:,1,1,1).^2, 1) * dt);
+            if ~isempty(wf)   % unit (dt-weighted) energy per sensor, trial and deployment; scaled to the honest u_i energy below
+                wf = wf ./ sqrt(sum(wf.^2, 1) * dt);
             end
             attack_waveforms{pivot_idx} = wf;
         end
         rng(seed);
-
-        % Attacker amplitude, same convention as the sensor noise with attacker_db in place of agent_db.
-        gamma_w_attacker = (dt/w_psd_constant) * (Ps / db2magTen(attacker_db));
-        attacker_scale = sqrt(gamma_w_attacker * w_psd_constant / dt);
 
         ai = 1;
         bi = 0;
@@ -526,16 +525,23 @@ for experiment_idx = 1:numel(run_experiment)
                     atk_by_pivot{pivot_idx}       = atk;
                     ui_honest_by_pivot{pivot_idx} = ui_honest_atk;
                     switch pivot_types(pivot_idx)
-                        case "flip"              % -alpha*m_i^2*rho(t-t0) - w_i(t)
+                        case "flip"              % -x_i(t) through the matched filter (= -u_i, MF is linear)
                             ui_atk_by_attack{pivot_idx} = -ui_honest_atk;
                         case "amplitude scale"   % beta*(alpha*m_i^2*rho(t-t0) + w_i(t))
                             ui_atk_by_attack{pivot_idx} = attacker_beta * ui_honest_atk;
-                        case "time shift"        % shifted copy, truncated to [0, T0]
-                            ui_atk_by_attack{pivot_idx} = shift_waveform(ui_honest_atk, t, pivot_shift(pivot_idx));
+                        case "time shift"        % spoofed observation: x_i(t - shift) moved inside its own K-sample window,
+                                                 % vacated samples refilled with fresh noise, then the agent's matched filter
+                            k_shift = floor(pivot_shift(pivot_idx) / dt);   % whole samples (checked on the grid above)
+                            x_shift = sqrt(gamma_w * w_psd_constant / dt) * attack_fill_noise{pivot_idx}(:,atk,:,:,:);
+                            kept = max(1, 1 + k_shift) : min(K, K + k_shift);   % samples that still hold shifted x_i
+                            x_shift(kept,:,:,:,:) = noisy_unified_xi(kept - k_shift,atk,:,:,:);
+                            [~, ui_atk_by_attack{pivot_idx}] = mf_integral_fft(x_shift, mi_5d(:,atk,:,:,:) .* sensor_signal(t, Tp, norm_fact), 1, 1, K, dt, Tp);
                         case "none"              % no attack: compromised sensors stay honest
                             ui_atk_by_attack{pivot_idx} = [];   % unused -- out_cws is the honest signal
-                        otherwise                % replaced by a scaled attack waveform
-                            ui_atk_by_attack{pivot_idx} = attacker_scale * attack_waveforms{pivot_idx}(:,atk,:,:,:);
+                        otherwise                % jamming waveform with the same energy as the honest u_i it replaces
+                            E_hon = sum(ui_honest_atk.^2, 1) * dt;   % 1 x |atk| x 1 x nTrials x D (signal + noise)
+                            ui_atk_by_attack{pivot_idx} = sqrt(E_hon) .* attack_waveforms{pivot_idx}(:,atk,:,:,:);
+                            % ui_atk_by_attack{pivot_idx} = attack_waveforms{pivot_idx}(:,atk,:,:,:);
                     end
                 end
 
@@ -1149,7 +1155,6 @@ for experiment_idx = 1:numel(run_experiment)
         avg_dep_mse_undefended = rho_empirical_mse_undefended;
         avg_dep_mse_oracle = rho_empirical_mse_oracle;   % (or mean(...) branch, matching the existing if/else)
         avg_dep_mse_full_honest = rho_empirical_mse_full_honest;
-        % avg_dep_mse_basis_supp = rho_empirical_mse_basis_supp;
         avg_dep_crlb_oracle = rho_crlb_oracle;
     else
         avg_dep_var = mean(rho_empirical_var,length(size(rho_empirical_var)));
@@ -1159,7 +1164,6 @@ for experiment_idx = 1:numel(run_experiment)
         avg_dep_mse_undefended = mean(rho_empirical_mse_undefended,length(size(rho_empirical_mse_undefended)));
         avg_dep_mse_oracle = mean(rho_empirical_mse_oracle,length(size(rho_empirical_mse_oracle)));   % (or mean(...) branch, matching the existing if/else)
         avg_dep_mse_full_honest = mean(rho_empirical_mse_full_honest,length(size(rho_empirical_mse_full_honest)));
-        % avg_dep_mse_basis_supp = mean(rho_empirical_mse_basis_supp,length(size(rho_empirical_mse_basis_supp)));
         avg_dep_crlb_oracle = mean(rho_crlb_oracle,length(size(rho_crlb_oracle)));
     end
 
@@ -1168,7 +1172,7 @@ for experiment_idx = 1:numel(run_experiment)
         avg_dep_mse_conv.(char(cm)) = mean(rho_mse_conv.(char(cm)), 8);   % dim 8 = deployments
     end
 
-    txt_list = ["undefended", "oracle", "full_honest"]; % , "basis_supp"];
+    txt_list = ["undefended", "oracle", "full_honest"];
 
     files_to_save = ["avg_dep_mse_" + txt_list, "avg_dep_var", "avg_dep_mse", "avg_dep_bias", "avg_dep_crlb", "avg_dep_crlb_oracle",...
         "agent_db_values", "channel_snr", "selected_schemes", "sensor_vals", "channel_db_values",...
@@ -1229,3 +1233,7 @@ for experiment_idx = 1:numel(run_experiment)
 
     %% Plotting placeholder
 end
+
+script_runtime = toc(script_tic);
+log_msg(verbosity_level, 1, 'Total runtime (%s): %dh %dm %.1fs', strjoin(experiment_list, ", "), ...
+    floor(script_runtime/3600), floor(mod(script_runtime, 3600)/60), mod(script_runtime, 60));
